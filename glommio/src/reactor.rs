@@ -23,7 +23,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ahash::AHashMap;
 use nix::sys::socket::{MsgFlags, SockaddrLike, SockaddrStorage};
 use smallvec::SmallVec;
 
@@ -40,6 +39,8 @@ use crate::{
 use nix::poll::PollFlags;
 
 type SharedChannelWakerChecker = (SmallVec<[Waker; 1]>, Option<Box<dyn Fn() -> usize>>);
+
+use timers::Timers;
 
 struct SharedChannels {
     id: u64,
@@ -62,7 +63,7 @@ impl SharedChannels {
             wake!(waker);
         }
 
-        for (_, (pending, check)) in self.wakers_map.iter_mut() {
+        for (pending, check) in self.wakers_map.values_mut() {
             if pending.is_empty() {
                 continue;
             }
@@ -76,68 +77,48 @@ impl SharedChannels {
     }
 }
 
-struct Timers {
-    timer_id: u64,
-    timers_by_id: AHashMap<u64, Instant>,
+// ============================================================================
+// Timer implementation using StagedWheel
+// ============================================================================
 
-    /// An ordered map of registered timers.
-    ///
-    /// Timers are in the order in which they fire. The `u64` in this type is
-    /// a timer ID used to distinguish timers that fire at the same time.
-    /// The [`Waker`] represents the task awaiting the timer.
-    timers: BTreeMap<(Instant, u64), Waker>,
-}
+mod timers {
+    use super::*;
+    use crate::timer::reactor_adapter::ReactorTimers;
+    use crate::timer::timer_id::TimerId;
 
-impl Timers {
-    fn new() -> Timers {
-        Timers {
-            timer_id: 0,
-            timers_by_id: AHashMap::new(),
-            timers: BTreeMap::new(),
-        }
+    pub(super) struct Timers {
+        wheel: ReactorTimers,
     }
 
-    fn new_id(&mut self) -> u64 {
-        self.timer_id += 1;
-        self.timer_id
-    }
-
-    fn remove(&mut self, id: u64) -> Option<Waker> {
-        if let Some(when) = self.timers_by_id.remove(&id) {
-            return self.timers.remove(&(when, id));
+    impl Timers {
+        pub(super) fn new() -> Timers {
+            Timers {
+                wheel: ReactorTimers::new(),
+            }
         }
 
-        None
-    }
-
-    fn insert(&mut self, id: u64, when: Instant, waker: Waker) {
-        if let Some(when) = self.timers_by_id.get_mut(&id) {
-            self.timers.remove(&(*when, id));
-        }
-        self.timers_by_id.insert(id, when);
-        self.timers.insert((when, id), waker);
-    }
-
-    /// Return the duration until next event and the number of
-    /// ready and woke timers.
-    fn process_timers(&mut self) -> (Option<Duration>, usize) {
-        let now = Instant::now();
-
-        // Split timers into ready and pending timers.
-        let pending = self.timers.split_off(&(now, 0));
-        let ready = mem::replace(&mut self.timers, pending);
-        let woke = ready.len();
-        for (_, waker) in ready {
-            wake!(waker);
+        /// Insert a timer and return its handle
+        ///
+        /// BREAKING CHANGE: Now returns TimerId instead of using external IDs
+        pub(super) fn insert_with_handle(&mut self, when: Instant, waker: Waker) -> TimerId {
+            self.wheel.insert(when, waker)
         }
 
-        // Calculate the duration until the next event.
-        let next = self
-            .timers
-            .keys()
-            .next()
-            .map(|(when, _)| when.saturating_duration_since(now));
-        (next, woke)
+        /// Remove a timer by handle (O(1), no hashing!)
+        pub(super) fn remove_by_handle(&mut self, handle: TimerId) -> bool {
+            self.wheel.remove(handle)
+        }
+
+        /// Check if a timer exists by handle
+        pub(super) fn exists_by_handle(&self, handle: TimerId) -> bool {
+            self.wheel.exists(handle)
+        }
+
+        /// Return the duration until next event and the number of
+        /// ready and woke timers.
+        pub(super) fn process_timers(&mut self) -> (Option<Duration>, usize) {
+            self.wheel.process_timers()
+        }
     }
 }
 
@@ -149,6 +130,15 @@ impl Timers {
 ///
 /// There is only one global instance of this type, accessible by
 /// [`Local::get_reactor()`].
+///
+/// # Cache Alignment
+///
+/// Aligned to 64 bytes (cache line boundary) to prevent inter-shard cache
+/// pollution in multi-executor scenarios. When multiple executors run on
+/// different cores, hardware prefetchers can pull neighboring cache lines,
+/// causing false sharing. Aligning the Reactor (root of each shard) prevents
+/// this at negligible memory cost (one Reactor per executor).
+#[repr(align(64))]
 pub(crate) struct Reactor {
     /// Raw bindings to `epoll`/`kqueue`/`wepoll`.
     pub(crate) sys: sys::Reactor,
@@ -738,31 +728,30 @@ impl Reactor {
         source
     }
 
-    /// Registers a timer in the reactor.
+    /// Registers a timer and returns a TimerId for O(1) cancellation.
     ///
-    /// Returns the registered timer's ID.
-    pub(crate) fn register_timer(&self) -> u64 {
+    /// This API provides direct access to timer storage without HashMap overhead.
+    pub(crate) fn insert_timer(
+        &self,
+        when: Instant,
+        waker: Waker,
+    ) -> crate::timer::timer_id::TimerId {
         let mut timers = self.timers.borrow_mut();
-        timers.new_id()
+        timers.insert_with_handle(when, waker)
     }
 
-    /// Registers a timer in the reactor.
+    /// Removes a timer by TimerId (O(1), no hashing).
     ///
-    /// Returns the inserted timer's ID.
-    pub(crate) fn insert_timer(&self, id: u64, when: Instant, waker: Waker) {
+    /// Returns true if the timer was found and removed.
+    pub(crate) fn remove_timer(&self, id: crate::timer::timer_id::TimerId) -> bool {
         let mut timers = self.timers.borrow_mut();
-        timers.insert(id, when, waker);
+        timers.remove_by_handle(id)
     }
 
-    /// Deregisters a timer from the reactor.
-    pub(crate) fn remove_timer(&self, id: u64) -> Option<Waker> {
-        let mut timers = self.timers.borrow_mut();
-        timers.remove(id)
-    }
-
-    pub(crate) fn timer_exists(&self, id: &(Instant, u64)) -> bool {
+    /// Checks if a timer exists by TimerId.
+    pub(crate) fn timer_exists(&self, id: crate::timer::timer_id::TimerId) -> bool {
         let timers = self.timers.borrow();
-        timers.timers.contains_key(id)
+        timers.exists_by_handle(id)
     }
 
     /// Processes ready timers and extends the list of wakers to wake.

@@ -156,15 +156,15 @@ impl RxBuf for Preallocated {
 
 #[derive(Debug)]
 struct Timeout {
-    id: u64,
+    handle: Cell<Option<crate::timer::timer_id::TimerId>>,
     timeout: Cell<Option<Duration>>,
     timer: Cell<Option<Instant>>,
 }
 
 impl Timeout {
-    fn new(id: u64) -> Self {
+    fn new() -> Self {
         Self {
-            id,
+            handle: Cell::new(None),
             timeout: Cell::new(None),
             timer: Cell::new(None),
         }
@@ -188,7 +188,8 @@ impl Timeout {
         if let Some(timeout) = self.timeout.get() {
             if self.timer.get().is_none() {
                 let deadline = Instant::now() + timeout;
-                reactor.insert_timer(self.id, deadline, waker.clone());
+                let id = reactor.insert_timer(deadline, waker.clone());
+                self.handle.set(Some(id));
                 self.timer.set(Some(deadline));
             }
         }
@@ -196,14 +197,17 @@ impl Timeout {
 
     fn cancel_timer(&self, reactor: &Reactor) {
         if self.timer.take().is_some() {
-            reactor.remove_timer(self.id);
+            if let Some(id) = self.handle.take() {
+                reactor.remove_timer(id);
+            }
         }
     }
 
     fn check(&self, reactor: &Reactor) -> io::Result<()> {
-        if let Some(deadline) = self.timer.get() {
-            if !reactor.timer_exists(&(deadline, self.id)) {
-                reactor.remove_timer(self.id);
+        if let Some(id) = self.handle.get() {
+            if !reactor.timer_exists(id) {
+                reactor.remove_timer(id);
+                self.handle.take();
                 self.timer.take();
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -366,8 +370,8 @@ where
             stream: socket.into(),
             source_tx: None,
             source_rx: None,
-            write_timeout: Timeout::new(reactor.register_timer()),
-            read_timeout: Timeout::new(reactor.register_timer()),
+            write_timeout: Timeout::new(),
+            read_timeout: Timeout::new(),
         };
         stream.init();
         GlommioStream {
