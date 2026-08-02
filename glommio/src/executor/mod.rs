@@ -1318,7 +1318,7 @@ impl LocalExecutor {
         me.yielded = true;
     }
 
-    fn spawn<T>(&self, future: impl Future<Output = T>) -> multitask::Task<T> {
+    fn spawn_internal<T>(&self, future: impl Future<Output = T>) -> multitask::Task<T> {
         let tq = self
             .queues
             .borrow()
@@ -1330,6 +1330,36 @@ impl LocalExecutor {
         let id = self.id;
         let ex = tq.borrow().ex.clone();
         ex.spawn_and_run(id, tq, future)
+    }
+
+    /// Spawns a task directly onto this executor instance.
+    ///
+    /// Unlike [`spawn_local`], this uses the executor you already have a
+    /// reference to rather than a thread-local, so it **never panics** and can
+    /// be called from any context — including before [`run`] has been called,
+    /// which is useful for setting work up in advance.
+    ///
+    /// This is only reachable from the thread that owns the executor, since
+    /// [`LocalExecutor`] is not [`Send`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use glommio::LocalExecutor;
+    ///
+    /// let executor = LocalExecutor::default();
+    ///
+    /// // spawning before run() is fine here; spawn_local would panic
+    /// let task = executor.spawn(async { 1 + 2 });
+    ///
+    /// let result = executor.run(task);
+    /// assert_eq!(result, 3);
+    /// ```
+    ///
+    /// [`spawn_local`]: crate::spawn_local
+    /// [`run`]: LocalExecutor::run
+    pub fn spawn<T>(&self, future: impl Future<Output = T>) -> Task<T> {
+        Task(self.spawn_internal(future))
     }
 
     fn spawn_into<T, F>(&self, future: F, handle: TaskQueueHandle) -> Result<multitask::Task<T>>
@@ -2643,14 +2673,14 @@ impl ExecutorProxy {
         T: 'static,
     {
         #[cfg(any(not(nightly), not(feature = "native-tls")))]
-        return LOCAL_EX.with(|local_ex| Task::<T>(local_ex.spawn(future)));
+        return LOCAL_EX.with(|local_ex| Task::<T>(local_ex.spawn_internal(future)));
 
         #[cfg(all(nightly, feature = "native-tls"))]
         return Task::<T>(unsafe {
             LOCAL_EX
                 .as_ref()
                 .expect("this thread doesn't have a LocalExecutor running")
-                .spawn(future)
+                .spawn_internal(future)
         });
     }
 
@@ -2733,14 +2763,15 @@ impl ExecutorProxy {
         future: impl Future<Output = T> + 'a,
     ) -> ScopedTask<'a, T> {
         #[cfg(any(not(nightly), not(feature = "native-tls")))]
-        return LOCAL_EX.with(|local_ex| ScopedTask::<'a, T>(local_ex.spawn(future), PhantomData));
+        return LOCAL_EX
+            .with(|local_ex| ScopedTask::<'a, T>(local_ex.spawn_internal(future), PhantomData));
 
         #[cfg(all(nightly, feature = "native-tls"))]
         return ScopedTask::<'a, T>(
             LOCAL_EX
                 .as_ref()
                 .expect("this thread doesn't have a LocalExecutor running")
-                .spawn(future),
+                .spawn_internal(future),
             PhantomData,
         );
     }
