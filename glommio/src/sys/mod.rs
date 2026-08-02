@@ -3,7 +3,6 @@
 //
 // This product includes software developed at Datadog (https://www.datadoghq.com/). Copyright 2020 Datadog, Inc.
 //
-use crate::uring_sys;
 use ahash::AHashMap;
 use log::debug;
 use nix::sys::socket::SockaddrLike;
@@ -466,15 +465,65 @@ pub struct StatxTimestamp {
     pub __statx_timestamp_pad1: [i32; 1],
 }
 
+/// Uninitialised storage for a peer address, filled in by `accept`.
+///
+/// Lived in the vendored `iou` wrapper; it is a dozen lines and glommio is the
+/// only consumer, so it moves here rather than being taken from a crate.
+pub struct SockAddrStorage {
+    storage: std::mem::MaybeUninit<nix::sys::socket::sockaddr_storage>,
+    len: libc::socklen_t,
+}
+
+impl fmt::Debug for SockAddrStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SockAddrStorage")
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl SockAddrStorage {
+    pub fn uninit() -> Self {
+        SockAddrStorage {
+            storage: std::mem::MaybeUninit::uninit(),
+            len: std::mem::size_of::<nix::sys::socket::sockaddr_storage>() as libc::socklen_t,
+        }
+    }
+
+    /// Address and length pointers for handing to the kernel.
+    ///
+    /// The kernel writes both, so they must stay valid until the completion is
+    /// reaped; the `Source` owning this storage is what guarantees that.
+    pub(crate) fn as_raw_parts(&mut self) -> (*mut libc::sockaddr, *mut libc::socklen_t) {
+        (
+            self.storage.as_mut_ptr() as *mut libc::sockaddr,
+            &mut self.len as *mut libc::socklen_t,
+        )
+    }
+}
+
+/// The kernel's `struct __kernel_timespec`.
+///
+/// Two fixed-width fields with a stable kernel ABI, laid out exactly as
+/// `io_uring::types::Timespec` is, which is what lets the submission path hand
+/// the kernel a pointer to one of these without copying it into a temporary
+/// that would be dropped before the SQE is consumed.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub(crate) struct KernelTimespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct TimeSpec64 {
-    raw: uring_sys::__kernel_timespec,
+    raw: KernelTimespec,
 }
 
 impl Default for TimeSpec64 {
     fn default() -> TimeSpec64 {
         TimeSpec64 {
-            raw: uring_sys::__kernel_timespec {
+            raw: KernelTimespec {
                 tv_sec: 0,
                 tv_nsec: 0,
             },
@@ -511,7 +560,7 @@ impl TryFrom<Duration> for TimeSpec64 {
     fn try_from(dur: Duration) -> Result<Self, Self::Error> {
         if let Ok(secs) = i64::try_from(dur.as_secs()) {
             Ok(TimeSpec64 {
-                raw: uring_sys::__kernel_timespec {
+                raw: KernelTimespec {
                     tv_sec: secs,
                     tv_nsec: dur.subsec_nanos() as libc::c_longlong,
                 },
@@ -524,7 +573,7 @@ impl TryFrom<Duration> for TimeSpec64 {
 
 impl TimeSpec64 {
     pub const MAX: TimeSpec64 = TimeSpec64 {
-        raw: uring_sys::__kernel_timespec {
+        raw: KernelTimespec {
             tv_sec: i64::MAX,
             tv_nsec: 999_999_999,
         },
