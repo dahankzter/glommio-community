@@ -328,17 +328,61 @@ fn check_supported_operations(ops: &[(&'static str, u8)]) -> Result<(), UringUns
 }
 
 lazy_static! {
-    static ref IO_URING_SUPPORT: Result<(), String> =
-        check_supported_operations(GLOMMIO_URING_OPS).map_err(|reason| reason.to_string());
+    /// The probe's verdict, once one has been reached. `None` means it has not
+    /// been, which is not the same as "not tried yet" -- see below.
+    static ref IO_URING_SUPPORT: std::sync::Mutex<Option<Result<(), String>>> =
+        std::sync::Mutex::new(None);
+}
+
+/// Whether a failed probe says something about the kernel or only about this
+/// moment.
+///
+/// Running out of descriptors or memory says nothing about whether io_uring
+/// works here, and both conditions pass. A missing opcode or a kernel that
+/// does not implement io_uring at all is not going to change under us.
+fn is_transient(err: &UringUnsupported) -> bool {
+    match err {
+        UringUnsupported::SetupFailed(err) | UringUnsupported::ProbeFailed(err) => matches!(
+            err.raw_os_error(),
+            Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOMEM)
+        ),
+        UringUnsupported::MissingOps(_) => false,
+    }
 }
 
 /// Returns `Err` with a description of what is wrong if this kernel cannot run
-/// glommio. Probed once per process.
+/// glommio.
+///
+/// Probed once per process, but only a *definitive* answer is remembered. A
+/// probe that failed because the process was momentarily out of descriptors is
+/// not a fact about the kernel, and caching it would tell every later executor
+/// on this process that io_uring is unsupported long after the descriptors
+/// came back.
 pub(crate) fn check_uring_support() -> io::Result<()> {
-    IO_URING_SUPPORT
-        .as_ref()
-        .map(|_| ())
-        .map_err(|reason| io::Error::new(io::ErrorKind::Unsupported, reason.clone()))
+    let unsupported = |reason: String| io::Error::new(io::ErrorKind::Unsupported, reason);
+    // A poisoned lock here carries no state worth protecting: the value behind
+    // it is a cached verdict, and a panicking prober leaves it untouched.
+    let mut cached = IO_URING_SUPPORT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if let Some(verdict) = cached.as_ref() {
+        return verdict.clone().map_err(unsupported);
+    }
+
+    match check_supported_operations(GLOMMIO_URING_OPS) {
+        Ok(()) => {
+            *cached = Some(Ok(()));
+            Ok(())
+        }
+        Err(err) => {
+            let reason = err.to_string();
+            if !is_transient(&err) {
+                *cached = Some(Err(reason.clone()));
+            }
+            Err(unsupported(reason))
+        }
+    }
 }
 
 /// Builds the submission queue entry for one descriptor.
