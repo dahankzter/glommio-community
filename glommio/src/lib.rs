@@ -231,11 +231,14 @@
 //! ```
 //!
 //! Glommio also requires a kernel with a recent enough `io_uring` support, at
-//! least recent enough to run discovery probes. The minimum version at this
-//! time is 5.6, which is where the newest operation glommio submits
-//! (`IORING_OP_STATX` and friends) landed. Every supported kernel is probed at
-//! startup, and an executor fails to build rather than terminating the process
-//! if something it needs is missing.
+//! least recent enough to run discovery probes. Two different numbers get
+//! quoted for this and they mean different things. The newest operation
+//! glommio submits (`IORING_OP_STATX` and friends) landed in **5.6**, which is
+//! a hard floor: below it the startup probe cannot pass whatever else is
+//! true. The **5.8** quoted in the README and above is the documented minimum
+//! this project supports. Every supported kernel is probed at startup, and an
+//! executor fails to build rather than terminating the process if something it
+//! needs is missing.
 //!
 //! A new enough kernel is not sufficient on its own. Distributions increasingly
 //! ship `kernel.io_uring_disabled`, which restricts io_uring to privileged
@@ -292,16 +295,11 @@ macro_rules! wake {
 
 mod free_list;
 
-#[allow(clippy::redundant_slicing)]
-#[allow(dead_code)]
-#[allow(clippy::upper_case_acronyms)]
 mod parking;
 mod reactor;
 mod sys;
 pub mod task;
 
-#[allow(dead_code)]
-#[allow(clippy::upper_case_acronyms)]
 #[cfg(feature = "bench")]
 #[doc(hidden)]
 pub mod nop;

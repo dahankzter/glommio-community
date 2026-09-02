@@ -244,8 +244,8 @@ impl fmt::Display for UringUnsupported {
                 match err.raw_os_error() {
                     Some(libc::ENOSYS) => write!(
                         f,
-                        ". The kernel does not implement io_uring at all; glommio needs 5.6 or \
-                         newer"
+                        ". The kernel does not implement io_uring at all; glommio's supported \
+                         minimum is 5.8"
                     ),
                     Some(libc::EPERM) => {
                         write!(
@@ -276,8 +276,8 @@ impl fmt::Display for UringUnsupported {
             }
             UringUnsupported::MissingOps(ops) => write!(
                 f,
-                "the kernel's io_uring is missing operations glommio submits: {}. glommio needs a \
-                 kernel of 5.6 or newer",
+                "the kernel's io_uring is missing operations glommio submits: {}. glommio's \
+                 supported minimum is 5.8",
                 ops.iter()
                     .map(|op| format!("IORING_OP_{op}"))
                     .collect::<Vec<_>>()
@@ -1247,7 +1247,19 @@ impl SleepableRing {
                 // The rings are linked. Goodnight!
                 self.ring
                     .submit_and_wait(1)
-                    .map(|_| 1)
+                    .map(|submitted| {
+                        // `submit_sqes` above already flushed the queue and
+                        // checked that it submitted exactly the one entry that
+                        // links the rings, so this call is here to wait, not to
+                        // submit. A non-zero count means something was queued
+                        // between the two and is about to be waited on without
+                        // having been accounted for.
+                        debug_assert_eq!(
+                            submitted, 0,
+                            "submit_and_wait flushed {submitted} unexpected entries"
+                        );
+                        1
+                    })
                     .or_else(Reactor::busy_ok)
                     .or_else(Reactor::again_ok)
                     .or_else(Reactor::intr_ok)

@@ -515,6 +515,20 @@ pub(crate) struct KernelTimespec {
     pub tv_nsec: i64,
 }
 
+// The submission path casts `*const KernelTimespec` to `*const
+// types::Timespec` and hands that to the kernel, so the two layouts have to
+// agree. Checked rather than trusted: `io-uring` is a separate crate and its
+// definition could move under us in a patch release, which would otherwise
+// show up as a timeout with a garbage duration rather than as a build error.
+const _: () = {
+    assert!(
+        std::mem::size_of::<KernelTimespec>() == std::mem::size_of::<io_uring::types::Timespec>()
+    );
+    assert!(
+        std::mem::align_of::<KernelTimespec>() == std::mem::align_of::<io_uring::types::Timespec>()
+    );
+};
+
 #[derive(Clone, Copy)]
 pub(crate) struct TimeSpec64 {
     raw: KernelTimespec,
