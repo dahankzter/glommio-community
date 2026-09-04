@@ -449,8 +449,10 @@ where
                 .build(),
             UringOpDescriptor::StatxFd(statx_fd, statx_buf) => {
                 const EMPTY_PATH: &[u8] = b"\0";
-                let flags =
-                    libc::AT_STATX_SYNC_AS_STAT | libc::AT_NO_AUTOMOUNT | libc::AT_EMPTY_PATH;
+                // Not defined by the libc crate for musl targets. 0 in the
+                // kernel UAPI (`linux/stat.h`): do whatever stat() does.
+                const AT_STATX_SYNC_AS_STAT: libc::c_int = 0;
+                let flags = AT_STATX_SYNC_AS_STAT | libc::AT_NO_AUTOMOUNT | libc::AT_EMPTY_PATH;
                 opcode::Statx::new(
                     types::Fd(statx_fd),
                     EMPTY_PATH.as_ptr() as *const libc::c_char,
