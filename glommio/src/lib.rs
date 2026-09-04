@@ -230,15 +230,11 @@
 //! 512
 //! ```
 //!
-//! Glommio also requires a kernel with a recent enough `io_uring` support, at
-//! least recent enough to run discovery probes. Two different numbers get
-//! quoted for this and they mean different things. The newest operation
-//! glommio submits (`IORING_OP_STATX` and friends) landed in **5.6**, which is
-//! a hard floor: below it the startup probe cannot pass whatever else is
-//! true. The **5.8** quoted in the README and above is the documented minimum
-//! this project supports. Every supported kernel is probed at startup, and an
-//! executor fails to build rather than terminating the process if something it
-//! needs is missing.
+//! Glommio also needs a recent enough `io_uring`. The documented minimum is
+//! 5.8; nothing below 5.6 can work at all, since that is where the newest
+//! operation it submits (`IORING_OP_STATX` and friends) landed. The kernel is
+//! probed at startup and an executor fails to build, rather than the process
+//! dying, if something is missing.
 //!
 //! A new enough kernel is not sufficient on its own. Distributions increasingly
 //! ship `kernel.io_uring_disabled`, which restricts io_uring to privileged

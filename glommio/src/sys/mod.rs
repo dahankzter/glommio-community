@@ -466,9 +466,6 @@ pub struct StatxTimestamp {
 }
 
 /// Uninitialised storage for a peer address, filled in by `accept`.
-///
-/// Lived in the vendored `iou` wrapper; it is a dozen lines and glommio is the
-/// only consumer, so it moves here rather than being taken from a crate.
 pub struct SockAddrStorage {
     storage: std::mem::MaybeUninit<nix::sys::socket::sockaddr_storage>,
     len: libc::socklen_t,
@@ -490,10 +487,9 @@ impl SockAddrStorage {
         }
     }
 
-    /// Address and length pointers for handing to the kernel.
-    ///
-    /// The kernel writes both, so they must stay valid until the completion is
-    /// reaped; the `Source` owning this storage is what guarantees that.
+    /// Address and length pointers for handing to the kernel. It writes both,
+    /// so they must stay valid until the completion is reaped -- which the
+    /// `Source` owning this storage is what guarantees.
     pub(crate) fn as_raw_parts(&mut self) -> (*mut libc::sockaddr, *mut libc::socklen_t) {
         (
             self.storage.as_mut_ptr() as *mut libc::sockaddr,
@@ -502,12 +498,9 @@ impl SockAddrStorage {
     }
 }
 
-/// The kernel's `struct __kernel_timespec`.
-///
-/// Two fixed-width fields with a stable kernel ABI, laid out exactly as
-/// `io_uring::types::Timespec` is, which is what lets the submission path hand
-/// the kernel a pointer to one of these without copying it into a temporary
-/// that would be dropped before the SQE is consumed.
+/// The kernel's `struct __kernel_timespec`, laid out the same as
+/// `io_uring::types::Timespec` so the submission path can pass a pointer to
+/// one without copying it.
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub(crate) struct KernelTimespec {
@@ -515,11 +508,8 @@ pub(crate) struct KernelTimespec {
     pub tv_nsec: i64,
 }
 
-// The submission path casts `*const KernelTimespec` to `*const
-// types::Timespec` and hands that to the kernel, so the two layouts have to
-// agree. Checked rather than trusted: `io-uring` is a separate crate and its
-// definition could move under us in a patch release, which would otherwise
-// show up as a timeout with a garbage duration rather than as a build error.
+// `io-uring` is a separate crate, so hold it to that layout here: a change
+// there would otherwise show up as a timeout of garbage duration.
 const _: () = {
     assert!(
         std::mem::size_of::<KernelTimespec>() == std::mem::size_of::<io_uring::types::Timespec>()
