@@ -28,8 +28,8 @@ mod test {
         task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     };
 
-    const EXECUTOR_ID: u32 = 0;
-    const QUEUE_INDEX: u32 = 0;
+    const EXECUTOR_ID: usize = 0;
+    const QUEUE_INDEX: usize = 0;
 
     /// A waker that does nothing, for polling a `JoinHandle` whose task has
     /// already been run to completion.
@@ -57,7 +57,7 @@ mod test {
     /// take the owning-thread branch. Must be held for as long as any task from
     /// `spawn_capturing` is alive.
     fn own_tasks() -> test_executor_id::Guard {
-        test_executor_id::scoped(EXECUTOR_ID as usize)
+        test_executor_id::scoped(EXECUTOR_ID)
     }
 
     /// Spawn with a schedule closure that captures, so `RawTask::schedule`
