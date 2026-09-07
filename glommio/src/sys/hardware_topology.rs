@@ -372,3 +372,121 @@ mod test {
         check_topolgy(topology);
     }
 }
+
+#[cfg(test)]
+mod cache_domain_tests {
+    use super::get_cache_domain_id;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    /// A throwaway sysfs tree.
+    ///
+    /// The parsing under test takes the sysfs root as an argument precisely so
+    /// it can be pointed somewhere else, which is the only way to cover
+    /// topologies this machine does not have.
+    struct FakeSysfs(PathBuf);
+
+    impl FakeSysfs {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "glommio-topology-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("create fixture root");
+            FakeSysfs(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        /// Adds one cache index for `cpu`, as sysfs would expose it.
+        fn cache(&self, cpu: usize, index: usize, level: &str, kind: &str, shared: &str) -> &Self {
+            let dir = self.0.join(format!("cpu/cpu{cpu}/cache/index{index}"));
+            fs::create_dir_all(&dir).expect("create cache index");
+            // Trailing newlines, because sysfs has them and the list parser
+            // relies on it: `skip_delim` leaves the final byte alone so the
+            // terminator can be checked. A fixture without one hangs.
+            fs::write(dir.join("level"), format!("{level}\n")).expect("write level");
+            fs::write(dir.join("type"), format!("{kind}\n")).expect("write type");
+            fs::write(dir.join("shared_cpu_list"), format!("{shared}\n"))
+                .expect("write shared_cpu_list");
+            self
+        }
+    }
+
+    impl Drop for FakeSysfs {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_domain_is_the_lowest_cpu_sharing_the_deepest_cache() {
+        let sysfs = FakeSysfs::new();
+        // Two packages of four, sharing an L3 each.
+        for cpu in 0..8 {
+            let l3 = if cpu < 4 { "0-3" } else { "4-7" };
+            sysfs
+                .cache(cpu, 0, "1", "Data", &cpu.to_string())
+                .cache(cpu, 2, "3", "Unified", l3);
+        }
+
+        for cpu in 0..4 {
+            assert_eq!(get_cache_domain_id(sysfs.path(), cpu), Some(0), "cpu {cpu}");
+        }
+        for cpu in 4..8 {
+            assert_eq!(get_cache_domain_id(sysfs.path(), cpu), Some(4), "cpu {cpu}");
+        }
+    }
+
+    #[test]
+    fn an_instruction_cache_is_not_a_sharing_domain() {
+        let sysfs = FakeSysfs::new();
+        // An instruction cache reported at a deeper level than the unified one
+        // it shares a die with. Taking it would split a domain that is real.
+        sysfs
+            .cache(0, 0, "2", "Unified", "0-1")
+            .cache(0, 1, "3", "Instruction", "0");
+
+        assert_eq!(get_cache_domain_id(sysfs.path(), 0), Some(0));
+
+        let sysfs = FakeSysfs::new();
+        sysfs
+            .cache(1, 0, "2", "Unified", "0-1")
+            .cache(1, 1, "3", "Instruction", "1");
+
+        assert_eq!(
+            get_cache_domain_id(sysfs.path(), 1),
+            Some(0),
+            "the unified cache shared with cpu 0 decides the domain"
+        );
+    }
+
+    #[test]
+    fn a_machine_that_reports_no_cache_topology_has_no_domain() {
+        let sysfs = FakeSysfs::new();
+        // Some containers and some architectures expose no cache directory at
+        // all. The caller falls back to the package id.
+        assert_eq!(get_cache_domain_id(sysfs.path(), 0), None);
+    }
+
+    #[test]
+    fn an_unreadable_level_does_not_discard_the_rest() {
+        let sysfs = FakeSysfs::new();
+        sysfs
+            .cache(0, 0, "2", "Unified", "0-1")
+            .cache(0, 1, "not a number", "Unified", "0-7");
+
+        assert_eq!(
+            get_cache_domain_id(sysfs.path(), 0),
+            Some(0),
+            "the index that parsed still decides"
+        );
+    }
+}
