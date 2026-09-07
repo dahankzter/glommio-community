@@ -15,18 +15,14 @@ use std::{
 };
 
 fn yolo_accept(fd: BorrowedFd<'_>) -> Option<io::Result<RawFd>> {
-    // Listeners are put in non-blocking mode when they are created, so this
-    // returns `EAGAIN` rather than blocking the executor when the backlog is
-    // empty. It used to flip the flag on and back around every call, which
-    // cost two extra `fcntl` syscalls per accepted connection, and three
-    // `unwrap`s on a path that runs per connection.
+    // Listeners are non-blocking from construction, so this returns EAGAIN
+    // rather than parking the executor when the backlog is empty.
     debug_assert!(
         {
             let flags = nix::fcntl::fcntl(fd, nix::fcntl::F_GETFL).unwrap();
             nix::fcntl::OFlag::from_bits_truncate(flags).contains(nix::fcntl::OFlag::O_NONBLOCK)
         },
-        "a listener reached accept in blocking mode: whoever built it skipped \
-         set_nonblocking, and this call would park the whole executor"
+        "listener is blocking; accept would park the executor"
     );
 
     match sys::accept_syscall(fd.as_raw_fd()) {
