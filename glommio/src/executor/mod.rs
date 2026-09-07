@@ -190,6 +190,21 @@ impl PartialEq for TaskQueue {
 impl Eq for TaskQueue {}
 
 impl TaskQueue {
+    /// The index this queue is registered under in the executor's queue map.
+    ///
+    /// Stored in each task's header so its schedule function can find the
+    /// queue without capturing a reference to it. See `schedule_runnable`.
+    pub(crate) fn index(&self) -> u32 {
+        // Panic rather than truncate. The header stores this narrowed, and a
+        // silent wrap would have a task scheduled onto a different queue with
+        // nothing to show for it.
+        self.stats
+            .index
+            .index()
+            .try_into()
+            .expect("task queue index outgrew u32")
+    }
+
     fn new<S>(
         index: TaskQueueHandle,
         name: S,
@@ -1087,6 +1102,52 @@ impl<T> PoolThreadHandles<T> {
     }
 }
 
+/// Pushes a woken task back onto its task queue and activates that queue.
+///
+/// The task carries the index of its queue in its header rather than a
+/// reference to it, so this resolves the queue from the executor running on
+/// this thread. That is sound because every caller of a task's schedule
+/// function -- `do_wake`, `drop_waker` and `run` in `task::raw` -- first checks
+/// that the current thread owns the task, and routes to the notifier otherwise.
+///
+/// Keeping the queue out of the schedule closure is what lets that closure be
+/// zero-sized, which lets `RawTask::schedule` skip the waker clone/drop guard
+/// it would otherwise need. See `Header::task_queue_index`.
+///
+/// A missing queue means the queue was destroyed, or the executor is shutting
+/// down; in both cases the runnable is dropped, which cancels the task. This
+/// matches the previous behaviour, where the closure held a `Weak` to the queue
+/// and did nothing when it failed to upgrade.
+pub(crate) fn schedule_runnable(runnable: multitask::Runnable) {
+    let handle = TaskQueueHandle {
+        index: runnable.task_queue_index() as usize,
+    };
+
+    #[cfg(any(not(nightly), not(feature = "native-tls")))]
+    {
+        if LOCAL_EX.is_set() {
+            LOCAL_EX.with(|local_ex| {
+                if let Some(tq) = local_ex.get_queue(&handle) {
+                    tq.borrow().ex.push_task(runnable);
+                    maybe_activate(tq);
+                }
+            });
+        }
+    }
+
+    #[cfg(all(nightly, feature = "native-tls"))]
+    {
+        // SAFETY: `LOCAL_EX` is a thread-local raw pointer to the executor
+        // running on this thread; it is null when none is running.
+        if let Some(local_ex) = unsafe { LOCAL_EX.as_ref() } {
+            if let Some(tq) = local_ex.get_queue(&handle) {
+                tq.borrow().ex.push_task(runnable);
+                maybe_activate(tq);
+            }
+        }
+    }
+}
+
 pub(crate) fn maybe_activate(tq: Rc<RefCell<TaskQueue>>) {
     #[cfg(any(not(nightly), not(feature = "native-tls")))]
     {
@@ -1343,6 +1404,7 @@ impl LocalExecutor {
 
         let id = self.id;
         let ex = tq.borrow().ex.clone();
+        let id = id.try_into().expect("executor id outgrew u32");
         ex.spawn_and_run(id, tq, future)
     }
 
@@ -1387,6 +1449,7 @@ impl LocalExecutor {
         let id = self.id;
 
         // can't run right away, because we need to cross into a different task queue
+        let id = id.try_into().expect("executor id outgrew u32");
         Ok(ex.spawn_and_schedule(id, tq, future))
     }
 

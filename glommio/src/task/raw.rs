@@ -27,6 +27,41 @@ use crate::{
     },
 };
 
+/// Test-only override for the owning-executor identity.
+///
+/// `do_wake`, `drop_waker` and `run` all branch on whether the current thread
+/// owns the task, and with no executor installed that check always says "not
+/// mine" and sends everything down the foreign path. That makes the local
+/// teardown path — the reference counting and deallocation, the most
+/// `unsafe`-dense code here — untestable without a reactor. See
+/// `task::lifecycle_tests`.
+#[cfg(test)]
+pub(crate) mod test_executor_id {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ID: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn get() -> Option<usize> {
+        ID.with(Cell::get)
+    }
+
+    /// Sets the override for the current thread, restoring it on drop.
+    pub(crate) fn scoped(id: usize) -> Guard {
+        let previous = ID.with(|c| c.replace(Some(id)));
+        Guard(previous)
+    }
+
+    pub(crate) struct Guard(Option<usize>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ID.with(|c| c.set(self.0));
+        }
+    }
+}
+
 /// The vtable for a task.
 pub(crate) struct TaskVTable {
     /// Schedules the task.
@@ -111,7 +146,8 @@ where
     pub(crate) fn allocate(
         future: F,
         schedule: S,
-        executor_id: usize,
+        executor_id: u32,
+        task_queue_index: u32,
         latency_matters: bool,
     ) -> NonNull<()> {
         // Compute the layout of the task for allocation. Abort if the computation
@@ -129,7 +165,8 @@ where
 
             // Write the header as the first field of the task.
             (raw.header as *mut Header).write(Header {
-                notifier: sys::get_sleep_notifier_for(executor_id).unwrap(),
+                executor_id,
+                task_queue_index,
                 state: SCHEDULED | HANDLE,
                 latency_matters,
                 references: AtomicRefCount::new(0),
@@ -162,14 +199,26 @@ where
     }
 
     unsafe fn my_id(&self) -> usize {
-        self.notifier().id()
+        (*self.header).executor_id as usize
     }
 
-    unsafe fn notifier(&self) -> &sys::SleepNotifier {
-        &(*self.header).notifier
+    /// Resolves the owning executor's notifier from the global registry.
+    ///
+    /// Only called on the foreign-wake path, so the registry lock is taken once
+    /// per cross-thread wake rather than once per spawn. Returns `None` once the
+    /// owning executor is gone, in which case no one is left to poll the task.
+    unsafe fn notifier(&self) -> Option<std::sync::Arc<sys::SleepNotifier>> {
+        sys::get_sleep_notifier_for(self.my_id())
     }
 
     fn thread_id() -> Option<usize> {
+        // The lifecycle tests need to take the owning-thread path without a
+        // `LocalExecutor`, which would pull in io_uring and so cannot run under
+        // Miri. Unset outside those tests, so behaviour is unchanged.
+        #[cfg(test)]
+        if let Some(id) = test_executor_id::get() {
+            return Some(id);
+        }
         crate::executor::executor_id()
     }
 
@@ -224,11 +273,14 @@ where
         let raw = Self::from_ptr(ptr);
         if Self::thread_id() != Some(raw.my_id()) {
             dbg_context!(ptr, "foreign", {
-                let notifier = raw.notifier();
-                notifier.queue_waker(
-                    Waker::from_raw(Self::clone_waker(ptr)),
-                    (*raw.header).latency_matters,
-                );
+                // If the owning executor is gone there is nothing left to wake
+                // into, so the notification is dropped.
+                if let Some(notifier) = raw.notifier() {
+                    notifier.queue_waker(
+                        Waker::from_raw(Self::clone_waker(ptr)),
+                        (*raw.header).latency_matters,
+                    );
+                }
             });
         } else {
             let state = (*raw.header).state;
@@ -304,11 +356,15 @@ where
                     // is dropped, schedule it once more to ensure the task
                     // will be destroyed
                     if Self::decrement_references(&*(raw.header as *mut Header)) == 0 {
-                        let notifier = raw.notifier();
-                        notifier.queue_waker(
-                            Waker::from_raw(Self::clone_waker(ptr)),
-                            (*raw.header).latency_matters,
-                        );
+                        // As in `do_wake`: if the owning executor is already
+                        // gone there is nobody left to run the destruction, and
+                        // queueing onto a dead notifier would only strand it.
+                        if let Some(notifier) = raw.notifier() {
+                            notifier.queue_waker(
+                                Waker::from_raw(Self::clone_waker(ptr)),
+                                (*raw.header).latency_matters,
+                            );
+                        }
                     }
                     return;
                 });

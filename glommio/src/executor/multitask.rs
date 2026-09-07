@@ -9,7 +9,7 @@
 #![warn(missing_docs, missing_debug_implementations)]
 
 use crate::{
-    executor::{maybe_activate, TaskQueue},
+    executor::TaskQueue,
     task::{task_impl, JoinHandle},
     Latency,
 };
@@ -111,6 +111,22 @@ impl LocalQueue {
     }
 }
 
+/// Compile-time proof that the schedule closure captures nothing.
+///
+/// `RawTask::schedule` only skips its waker clone/drop guard -- two atomic
+/// read-modify-writes on every wake -- when the schedule function is
+/// zero-sized. Capturing anything at all silently gives that back, costing
+/// roughly a third of a task switch with no test failing. Fail the build
+/// instead.
+fn assert_zero_sized<T>(_: &T) {
+    const {
+        assert!(
+            std::mem::size_of::<T>() == 0,
+            "the schedule closure must capture nothing: see Header::task_queue_index"
+        )
+    }
+}
+
 /// A single-threaded executor.
 #[derive(Debug)]
 pub(crate) struct LocalExecutor {
@@ -136,37 +152,44 @@ impl LocalExecutor {
     /// Spawns a thread-local future onto this executor.
     fn spawn<T>(
         &self,
-        executor_id: usize,
+        executor_id: u32,
         tq: Rc<RefCell<TaskQueue>>,
         future: impl Future<Output = T>,
     ) -> (Runnable, JoinHandle<T>) {
-        let latency_matters = match tq.borrow().io_requirements.latency_req {
-            Latency::Matters(_) => true,
-            Latency::NotImportant => false,
+        let (latency_matters, task_queue_index) = {
+            let tq = tq.borrow();
+            let latency_matters = match tq.io_requirements.latency_req {
+                Latency::Matters(_) => true,
+                Latency::NotImportant => false,
+            };
+            (latency_matters, tq.index())
         };
-        let tq = Rc::downgrade(&tq);
 
         // The function that schedules a runnable task when it gets woken up.
-        let schedule = move |runnable: Runnable| {
-            let tq = tq.upgrade();
-
-            if let Some(tq) = tq {
-                {
-                    let queue = tq.borrow();
-                    queue.ex.local_queue.push(runnable);
-                }
-                maybe_activate(tq);
-            }
-        };
+        //
+        // This closure captures nothing, so it is zero-sized. That matters:
+        // `RawTask::schedule` guards a non-zero-sized schedule function by
+        // cloning and dropping a waker around the call, which costs two atomic
+        // read-modify-writes on every wake. Capturing so much as a `Weak` to
+        // the task queue here would reintroduce them. The queue is instead
+        // found from the index in the task header -- see `schedule_runnable`.
+        let schedule = |runnable: Runnable| crate::executor::schedule_runnable(runnable);
+        assert_zero_sized(&schedule);
 
         // Create a task, push it into the queue by scheduling it, and return its `Task`
         // handle.
-        task_impl::spawn_local(executor_id, future, schedule, latency_matters)
+        task_impl::spawn_local(
+            executor_id,
+            task_queue_index,
+            future,
+            schedule,
+            latency_matters,
+        )
     }
 
     pub(crate) fn spawn_and_run<T>(
         &self,
-        executor_id: usize,
+        executor_id: u32,
         tq: Rc<RefCell<TaskQueue>>,
         future: impl Future<Output = T>,
     ) -> Task<T> {
@@ -177,13 +200,18 @@ impl LocalExecutor {
 
     pub(crate) fn spawn_and_schedule<T>(
         &self,
-        executor_id: usize,
+        executor_id: u32,
         tq: Rc<RefCell<TaskQueue>>,
         future: impl Future<Output = T>,
     ) -> Task<T> {
         let (runnable, handle) = self.spawn(executor_id, tq, future);
         runnable.schedule();
         Task(Some(handle))
+    }
+
+    /// Pushes a woken task onto this queue's run list.
+    pub(crate) fn push_task(&self, runnable: Runnable) {
+        self.local_queue.push(runnable);
     }
 
     /// Gets one task from the queue, if one exists.
