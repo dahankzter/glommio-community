@@ -194,15 +194,8 @@ impl TaskQueue {
     ///
     /// Stored in each task's header so its schedule function can find the
     /// queue without capturing a reference to it. See `schedule_runnable`.
-    pub(crate) fn index(&self) -> u32 {
-        // Panic rather than truncate. The header stores this narrowed, and a
-        // silent wrap would have a task scheduled onto a different queue with
-        // nothing to show for it.
-        self.stats
-            .index
-            .index()
-            .try_into()
-            .expect("task queue index outgrew u32")
+    pub(crate) fn index(&self) -> usize {
+        self.stats.index.index()
     }
 
     fn new<S>(
@@ -1120,7 +1113,7 @@ impl<T> PoolThreadHandles<T> {
 /// and did nothing when it failed to upgrade.
 pub(crate) fn schedule_runnable(runnable: multitask::Runnable) {
     let handle = TaskQueueHandle {
-        index: runnable.task_queue_index() as usize,
+        index: runnable.task_queue_index(),
     };
 
     #[cfg(any(not(nightly), not(feature = "native-tls")))]
@@ -1404,7 +1397,6 @@ impl LocalExecutor {
 
         let id = self.id;
         let ex = tq.borrow().ex.clone();
-        let id = id.try_into().expect("executor id outgrew u32");
         ex.spawn_and_run(id, tq, future)
     }
 
@@ -1449,7 +1441,6 @@ impl LocalExecutor {
         let id = self.id;
 
         // can't run right away, because we need to cross into a different task queue
-        let id = id.try_into().expect("executor id outgrew u32");
         Ok(ex.spawn_and_schedule(id, tq, future))
     }
 

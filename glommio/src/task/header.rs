@@ -26,7 +26,7 @@ pub(crate) struct Header {
     /// the executor's eventfd alive for as long as any task outlives it. The
     /// notifier is instead resolved from the id on the foreign-wake path, which
     /// is rare. See `RawTask::notifier`.
-    pub(crate) executor_id: u32,
+    pub(crate) executor_id: usize,
 
     /// Index of the task queue this task belongs to.
     ///
@@ -38,9 +38,7 @@ pub(crate) struct Header {
     /// eight bytes of capture. Resolving the queue from this index on the
     /// owning thread keeps the closure zero-sized and skips the guard entirely.
     ///
-    /// A `u32` rather than a `usize` deliberately, as with `executor_id`:
-    /// together they keep `Header` at 40 bytes.
-    pub(crate) task_queue_index: u32,
+    pub(crate) task_queue_index: usize,
 
     /// Current state of the task.
     pub(crate) state: u8,

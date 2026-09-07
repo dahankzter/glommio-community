@@ -30,8 +30,8 @@ use std::sync::atomic::Ordering;
 /// [`Task`]: struct.Task.html
 /// [`JoinHandle`]: struct.JoinHandle.html
 pub(crate) fn spawn_local<F, R, S>(
-    executor_id: u32,
-    task_queue_index: u32,
+    executor_id: usize,
+    task_queue_index: usize,
     future: F,
     schedule: S,
     latency_matters: bool,
@@ -102,7 +102,7 @@ impl Task {
     /// Used by the schedule function to find its queue without capturing a
     /// reference to it, which is what keeps that closure zero-sized. See
     /// `Header::task_queue_index`.
-    pub(crate) fn task_queue_index(&self) -> u32 {
+    pub(crate) fn task_queue_index(&self) -> usize {
         let header = self.raw_task.as_ptr() as *const Header;
         // SAFETY: `raw_task` points at a live task allocation for as long as
         // this `Task` reference exists, and the header is its first field.
