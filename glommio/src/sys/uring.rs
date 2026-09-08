@@ -45,8 +45,6 @@ use buddy_alloc::buddy_alloc::{BuddyAlloc, BuddyAllocParam};
 use nix::sys::socket::{MsgFlags, SockFlag};
 use smallvec::SmallVec;
 
-const MSG_ZEROCOPY: i32 = 0x4000000;
-
 #[allow(dead_code)]
 #[derive(Debug)]
 enum UringOpDescriptor {
@@ -506,12 +504,12 @@ where
                     .offset(pos)
                     .build()
             }
-            UringOpDescriptor::SockSend(ptr, len, flags) => opcode::Send::new(fd, ptr, len as u32)
-                .flags(flags | MSG_ZEROCOPY)
-                .build(),
+            UringOpDescriptor::SockSend(ptr, len, flags) => {
+                opcode::Send::new(fd, ptr, len as u32).flags(flags).build()
+            }
             UringOpDescriptor::SockSendMsg(hdr, flags) => {
                 opcode::SendMsg::new(fd, hdr as *const libc::msghdr)
-                    .flags((flags | MSG_ZEROCOPY) as u32)
+                    .flags(flags as u32)
                     .build()
             }
             UringOpDescriptor::SockRecv(len, flags) => {
