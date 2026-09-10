@@ -13,6 +13,7 @@ mod common;
 
 use common::Glommio;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use futures::stream::{FuturesUnordered, StreamExt};
 use futures_lite::future::poll_once;
 use glommio::timer::{sleep, Timer};
 use std::{
@@ -29,6 +30,11 @@ const POPULATIONS: &[usize] = &[64, 256, 1_024, 4_096];
 /// is eight more levels of a B-tree than four thousand, so if `O(log n)` is
 /// going to cost anything it has to cost it here.
 const PREMISE_POPULATIONS: &[usize] = &[64, 4_096, 65_536, 262_144, 1_048_576];
+
+/// No small sizes, because the expiry cases divide one wake-up across the whole
+/// population: at 64 timers the executor's single return from the kernel is the
+/// entire measurement, and at 65,536 it is a rounding error.
+const EXPIRING_POPULATIONS: &[usize] = &[4_096, 65_536, 262_144, 1_048_576];
 
 /// Far enough out that nothing in these cases reaches it.
 const PARKED: Duration = Duration::from_secs(3_600);
@@ -218,10 +224,107 @@ fn sleep_under_coarse_clustered_population(c: &mut Criterion) {
     group.finish();
 }
 
+/// A whole population coming due, which nothing else here measures.
+///
+/// Every other case parks its timers an hour out so none of them fire, which
+/// leaves the structure's expiry path unmeasured on both sides. Main splits its
+/// map and drains the prefix; the wheel takes a slot whole. This is also the
+/// only case that exercises waking, so the per-timer figure includes the waker
+/// call that both structures have to make.
+///
+/// Every timer is given the same absolute deadline, so the whole population
+/// comes due at one instant and every bit of the work lands after it. The
+/// population is armed outside the timed region and the idle wait is subtracted
+/// exactly, which leaves the firing and nothing else. Staggering the deadlines
+/// instead would spread most of the work across the wait being subtracted.
+fn expire(c: &mut Criterion) {
+    // Inside the finest level, so the population shares one slot and nothing
+    // cascades on the way to firing.
+    const WAIT: Duration = Duration::from_millis(250);
+
+    let ex = Glommio::default();
+    let mut group = c.benchmark_group("timer/expire");
+    group.sample_size(10).warm_up_time(Duration::from_secs(1));
+
+    // A level-0 deadline has to be under 256ms, and the population has to be
+    // armed before it arrives, which is what bounds this case rather than
+    // anything structural.
+    for &n in EXPIRING_POPULATIONS.iter().filter(|n| **n <= 262_144) {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+            b.iter_custom(|iters| {
+                ex.0.run(async {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        total += fire_all(n, WAIT).await;
+                    }
+                    total / n as u32
+                })
+            })
+        });
+    }
+    group.finish();
+}
+
+/// The same population, placed one level out so that it has to cascade first.
+///
+/// One second is past level 0, so every timer is filed in a level-1 slot and
+/// the whole slot is broken down into level 0 before any of it can fire. Main
+/// has no equivalent step, so what this costs over [`expire`] is what the
+/// hierarchy charges to maintain itself.
+fn expire_after_cascade(c: &mut Criterion) {
+    const WAIT: Duration = Duration::from_secs(1);
+
+    let ex = Glommio::default();
+    let mut group = c.benchmark_group("timer/expire_cascaded");
+    group.sample_size(10).warm_up_time(Duration::from_secs(1));
+
+    for &n in EXPIRING_POPULATIONS {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+            b.iter_custom(|iters| {
+                ex.0.run(async {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        total += fire_all(n, WAIT).await;
+                    }
+                    total / n as u32
+                })
+            })
+        });
+    }
+    group.finish();
+}
+
+/// Arms `n` timers at `wait`, waits for all of them, and returns the time spent
+/// on everything but the waiting.
+async fn fire_all(n: usize, wait: Duration) -> Duration {
+    // `Timer::new` is relative and reads the clock itself, so shrinking the
+    // duration as the loop runs is what gives the whole population one shared
+    // deadline.
+    let target = Instant::now() + wait;
+    let mut timers: Vec<Timer> = (0..n)
+        .map(|_| Timer::new(target.saturating_duration_since(Instant::now())))
+        .collect();
+    // Registering is what the first poll does, and it is measured by `arm`.
+    for timer in timers.iter_mut() {
+        black_box(poll_once(timer).await);
+    }
+
+    let started = Instant::now();
+    assert!(
+        started < target,
+        "arming {n} timers outlasted the {wait:?} wait, so they were already due"
+    );
+    let mut pending: FuturesUnordered<Timer> = timers.into_iter().collect();
+    while pending.next().await.is_some() {}
+    started.elapsed() - target.duration_since(started)
+}
+
 criterion_group!(
     benches,
     arm,
     cancel,
+    expire,
+    expire_after_cascade,
     sleep_under_population,
     sleep_under_clustered_population,
     sleep_under_coarse_clustered_population
