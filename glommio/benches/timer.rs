@@ -362,10 +362,71 @@ fn short_sleep_under_population(c: &mut Criterion) {
     group.finish();
 }
 
+/// Waking after a long idle stretch, which is the one case the wheel could
+/// lose.
+///
+/// Main reads the first key of its map and is done, whatever the gap. The wheel
+/// has to move its cursor from where it was to where it is, and a naive one
+/// would pay per millisecond crossed: ten idle minutes with a populated wheel
+/// would cost six hundred thousand iterations for time in which nothing was
+/// due. `advance_to` steps to the next tick that has work instead, so the cost
+/// is meant to be the work and not the interval. This is what says whether that
+/// holds.
+///
+/// The gap has to be inside the timed region, because the crossing happens when
+/// the sleep completes, so the known gap is subtracted and what remains is the
+/// wake plus the crossing. A 1us sleep puts the wake floor near 6us, so a cost
+/// proportional to the gap would be unmissable: 100ms is a hundred thousand
+/// ticks, and even a nanosecond each would be 100us.
+///
+/// The population sits ten seconds out, which is a level-1 slot, so the wheel
+/// has a coarse level to cascade and cannot skip the gap in one jump.
+fn idle_gap(c: &mut Criterion) {
+    const GAPS_MS: &[u64] = &[1, 10, 100];
+    const POPULATION: Duration = Duration::from_secs(10);
+
+    let ex = Glommio::default();
+    let mut group = c.benchmark_group("timer/idle_gap");
+    group.sample_size(10).warm_up_time(Duration::from_secs(1));
+
+    for &n in &[4_096usize, 262_144] {
+        for &gap_ms in GAPS_MS {
+            group.bench_with_input(
+                BenchmarkId::new(format!("{n}"), format!("{gap_ms}ms")),
+                &(n, gap_ms),
+                |b, &(n, gap_ms)| {
+                    b.iter_custom(|iters| {
+                        ex.0.run(async {
+                            let gap = Duration::from_millis(gap_ms);
+                            let mut parked: Vec<Timer> =
+                                (0..n).map(|_| Timer::new(POPULATION)).collect();
+                            for timer in parked.iter_mut() {
+                                black_box(poll_once(timer).await);
+                            }
+
+                            let mut total = Duration::ZERO;
+                            for _ in 0..iters {
+                                let started = Instant::now();
+                                sleep(gap).await;
+                                total += started.elapsed().saturating_sub(gap);
+                            }
+
+                            drop(parked);
+                            total
+                        })
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     arm,
     cancel,
+    idle_gap,
     short_sleep_under_population,
     expire,
     expire_after_cascade,
