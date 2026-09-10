@@ -319,10 +319,54 @@ async fn fire_all(n: usize, wait: Duration) -> Duration {
     started.elapsed() - target.duration_since(started)
 }
 
+/// A sleep short enough that answering "what is due next" is most of it.
+///
+/// Both structures are asked for their earliest deadline on every park: main
+/// walks to the leftmost key of its map, the wheel scans an occupancy mask and
+/// reads one slot. Neither has ever been measured, because the only case that
+/// reaches the question sleeps 100us and buries it.
+///
+/// A microsecond does not bury it. What is left is one sleep's whole cost with
+/// a population present: arming the sleep, being asked for the next deadline,
+/// and firing. Those are separately measured by [`arm`] and [`expire`], so
+/// growth here beyond what those account for belongs to the question itself.
+///
+/// The population is parked an hour out, so it never becomes the answer and
+/// never fires; it is there to be searched past.
+fn short_sleep_under_population(c: &mut Criterion) {
+    let ex = Glommio::default();
+    let mut group = c.benchmark_group("timer/sleep_1us");
+    group.sample_size(10).warm_up_time(Duration::from_secs(1));
+
+    for &n in PREMISE_POPULATIONS {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+            b.iter_custom(|iters| {
+                ex.0.run(async {
+                    let mut parked: Vec<Timer> = (0..n).map(|_| Timer::new(PARKED)).collect();
+                    for timer in parked.iter_mut() {
+                        black_box(poll_once(timer).await);
+                    }
+
+                    let started = Instant::now();
+                    for _ in 0..iters {
+                        sleep(Duration::from_micros(1)).await;
+                    }
+                    let elapsed = started.elapsed();
+
+                    drop(parked);
+                    elapsed
+                })
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     arm,
     cancel,
+    short_sleep_under_population,
     expire,
     expire_after_cascade,
     sleep_under_population,
