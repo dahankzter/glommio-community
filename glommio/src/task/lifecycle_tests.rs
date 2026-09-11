@@ -3,11 +3,14 @@
 //
 // This product includes software developed at Datadog (https://www.datadoghq.com/). Copyright 2020 Datadog, Inc.
 //
-//! Task lifecycle tests that run under Miri.
+//! Task lifecycle tests, which run under the ordinary test runner and also
+//! under Miri.
 //!
 //! Every test in `tests.rs` builds a `LocalExecutor`, which means io_uring,
-//! which Miri cannot execute — so the most `unsafe`-dense code in the crate,
-//! `task::raw`, has had no undefined-behaviour coverage at all.
+//! which Miri cannot execute, so the most `unsafe`-dense code in the crate,
+//! `task::raw`, had no undefined-behaviour coverage at all. These need no
+//! reactor, which is what lets Miri run them; it is also why they cost nothing
+//! to run normally, and they do, on every `cargo test`.
 //!
 //! These drive the task machinery directly instead: allocate, run, schedule,
 //! cancel and drop, with a schedule function that just collects runnables.
@@ -15,11 +18,49 @@
 //! counting, the state transitions, and the allocation and teardown paths,
 //! which is where a use-after-free would live.
 //!
-//! Run with `make miri-core`.
+//! Run under Miri with
+//! `cargo +nightly miri test -p glommio --lib task::`, and under the normal
+//! test runner alongside everything else.
+
+/// Test-only override for the owning-executor identity, read by
+/// `raw::RawTask::thread_id` and set by nothing but the tests below.
+///
+/// `do_wake`, `drop_waker` and `run` all branch on whether the current thread
+/// owns the task, and with no executor installed that check always says "not
+/// mine" and sends everything down the foreign path. That makes the local
+/// teardown path, the reference counting and deallocation and the most
+/// `unsafe`-dense code in the crate, untestable without a reactor.
+#[cfg(test)]
+pub(crate) mod test_executor_id {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ID: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn get() -> Option<usize> {
+        ID.with(Cell::get)
+    }
+
+    /// Sets the override for the current thread, restoring it on drop.
+    pub(crate) fn scoped(id: usize) -> Guard {
+        let previous = ID.with(|c| c.replace(Some(id)));
+        Guard(previous)
+    }
+
+    pub(crate) struct Guard(Option<usize>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ID.with(|c| c.set(self.0));
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {
-    use crate::task::{raw::test_executor_id, task_impl, task_impl::Task, JoinHandle};
+    use super::test_executor_id;
+    use crate::task::{task_impl, task_impl::Task, JoinHandle};
     use std::{
         cell::RefCell,
         future::Future,
