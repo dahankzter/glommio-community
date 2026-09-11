@@ -1346,4 +1346,100 @@ mod tests {
             }
         }
     }
+
+    /// Both halves of the wheel's contract, over randomized traffic.
+    ///
+    /// A timer may fire late; it may never fire early. And `next_expiry` may
+    /// name a time earlier than the truth, costing a wasted poll; it may never
+    /// name one later, which would sleep past a deadline.
+    #[test]
+    fn contract_holds_under_randomized_traffic() {
+        fn xorshift(state: &mut u64) -> u64 {
+            let mut x = *state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *state = x;
+            x
+        }
+
+        for seed in 1..=200u64 {
+            let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let start = Instant::now();
+            let mut wheel = TimingWheel::new_at(start);
+            let mut live: Vec<(TimerId, Instant)> = Vec::new();
+            let mut now = start;
+
+            for step in 0..400 {
+                match xorshift(&mut rng) % 10 {
+                    0..=4 => {
+                        // Three bands, because one modulus cannot reach both
+                        // ends: under 90s never places anything in level 3 or
+                        // the overflow map, and drawing only from days means
+                        // nothing ever fires inside a run. Sub-millisecond
+                        // fractions throughout, so rounding is exercised.
+                        let micros = match xorshift(&mut rng) % 3 {
+                            0 => xorshift(&mut rng) % 4_000,
+                            1 => xorshift(&mut rng) % 90_000_000,
+                            _ => xorshift(&mut rng) % 200_000_000_000,
+                        };
+                        let deadline = now + Duration::from_micros(micros);
+                        let id = wheel.insert(deadline, Waker::noop().clone());
+                        live.push((id, deadline));
+                    }
+                    5..=6 if !live.is_empty() => {
+                        let i = (xorshift(&mut rng) % live.len() as u64) as usize;
+                        let (id, _) = live.swap_remove(i);
+                        wheel.remove(id);
+                    }
+                    _ => {
+                        // Deliberately fine as well as coarse: a step that
+                        // lands inside the millisecond a deadline sits in is
+                        // the only thing that catches a timer firing early.
+                        let step_us = match xorshift(&mut rng) % 3 {
+                            0 => xorshift(&mut rng) % 900,
+                            1 => xorshift(&mut rng) % 50_000,
+                            _ => xorshift(&mut rng) % 3_000_000,
+                        };
+                        now += Duration::from_micros(step_us);
+                        wheel.advance_to(now);
+                        let drained: Vec<_> = wheel.drain_expired().collect();
+                        // Nothing is due and nothing is waiting to be drained,
+                        // so any deadline the wheel names has to be in the
+                        // future. Naming the present or the past makes the
+                        // reactor sleep for zero and wake straight back into
+                        // the same answer.
+                        if let Some(next) = wheel.next_expiry() {
+                            assert!(
+                                next > now,
+                                "seed {seed} step {step}: next_expiry is {:?} in the PAST",
+                                now.duration_since(next)
+                            );
+                        }
+                        for (id, _) in drained {
+                            let pos = live.iter().position(|(l, _)| *l == id);
+                            if let Some(pos) = pos {
+                                let (_, deadline) = live.swap_remove(pos);
+                                assert!(
+                                    deadline <= now,
+                                    "seed {seed} step {step}: fired {:?} EARLY",
+                                    deadline.duration_since(now)
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if let (Some(next), Some(truth)) =
+                    (wheel.next_expiry(), live.iter().map(|(_, d)| *d).min())
+                {
+                    assert!(
+                        next <= truth,
+                        "seed {seed} step {step}: next_expiry is {:?} LATER than a live deadline",
+                        next.duration_since(truth)
+                    );
+                }
+            }
+        }
+    }
 }
