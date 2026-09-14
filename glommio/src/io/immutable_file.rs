@@ -9,6 +9,7 @@ use crate::io::{
     DmaStreamReaderBuilder, DmaStreamWriter, DmaStreamWriterBuilder, IoVec, ReadManyResult,
     ReadResult, ScheduledSource,
 };
+use crate::Result;
 use futures_lite::{future::poll_fn, io::AsyncWrite, Stream};
 use std::{
     cell::Ref,
@@ -18,7 +19,6 @@ use std::{
     rc::Rc,
     task::{Context, Poll},
 };
-type Result<T> = crate::Result<T, ()>;
 
 #[derive(Debug)]
 /// Builds a new [`ImmutableFile`], allowing linear and random access to a

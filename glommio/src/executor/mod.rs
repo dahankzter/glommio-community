@@ -78,7 +78,7 @@ pub(crate) const DEFAULT_RING_SUBMISSION_DEPTH: usize = 128;
 /// that's only valid in the channel variants of the error. Otherwise, it
 /// might be confused with the error (`E`) that a result usually has in
 /// the second type parameter.
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 #[cfg(all(nightly, feature = "native-tls"))]
 #[thread_local]

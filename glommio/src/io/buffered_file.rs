@@ -16,7 +16,7 @@ use std::{
 
 use super::Stat;
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 /// An asynchronously accessed file backed by the OS page cache.
 ///

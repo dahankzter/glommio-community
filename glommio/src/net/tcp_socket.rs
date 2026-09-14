@@ -36,7 +36,7 @@ use std::{
     time::Duration,
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 #[derive(Debug)]
 /// A TCP socket server, listening for connections.

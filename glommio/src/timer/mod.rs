@@ -9,7 +9,7 @@ mod timer_impl;
 use std::{future::Future, time::Duration};
 pub use timer_impl::{Timer, TimerActionOnce, TimerActionRepeat};
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 /// Sleep for some time on the current task. Explicit sleeps can introduce undesirable delays if not used correctly.
 /// Consider using [crate::timer::timeout] instead if you are implementing timeout-like semantics or

@@ -29,7 +29,7 @@ use std::{
     task::{Context, Poll},
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 #[derive(Debug)]
 /// A Unix socket server, listening for connections.

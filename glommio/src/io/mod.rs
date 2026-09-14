@@ -136,7 +136,7 @@ mod stat;
 
 use std::path::Path;
 
-pub(super) type Result<T> = crate::Result<T, ()>;
+pub(super) use crate::Result;
 
 /// rename an existing file.
 pub async fn rename<P: AsRef<Path>, Q: AsRef<Path>>(old_path: P, new_path: Q) -> Result<()> {

@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 /// Root trait for socket stream receive buffer
 pub trait RxBuf {
