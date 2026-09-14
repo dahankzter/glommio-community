@@ -81,6 +81,10 @@ name    = "spawn"
 
 [[bench]]
 harness = false
+name    = "timer"
+
+[[bench]]
+harness = false
 name    = "executor"
 
 [[bench]]
