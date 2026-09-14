@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 #[derive(Debug)]
 struct Inner {

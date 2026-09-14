@@ -22,7 +22,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 pin_project! {
     #[derive(Debug)]

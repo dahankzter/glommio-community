@@ -66,7 +66,7 @@ use std::{
     iter::FromIterator,
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 #[cfg(doc)]
 use super::{LocalExecutor, LocalExecutorBuilder, LocalExecutorPoolBuilder};

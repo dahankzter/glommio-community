@@ -24,7 +24,7 @@ use std::{
     sync::{Arc, Weak as AWeak},
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 pub(super) type Device = u64;
 pub(super) type Inode = u64;

@@ -12,7 +12,7 @@ use std::{
 };
 
 /// Result type alias that all Glommio public API functions can use.
-pub type Result<T, V> = std::result::Result<T, GlommioError<V>>;
+pub type Result<T, V = ()> = std::result::Result<T, GlommioError<V>>;
 
 /// Resource Type used for errors that `WouldBlock` and includes extra
 /// diagnostic data for richer error messages.
@@ -184,7 +184,7 @@ impl fmt::Display for BuilderErrorKind {
 /// }
 /// assert!(will_error().is_err());
 /// ```
-pub enum GlommioError<T> {
+pub enum GlommioError<T = ()> {
     /// IO error from standard library functions or libraries that produce
     /// std::io::Error's.
     IoError(io::Error),

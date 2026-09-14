@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 #[derive(Debug)]
 /// An Udp Socket.

@@ -14,7 +14,7 @@ use std::{
     path::Path,
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 #[derive(Debug)]
 /// A directory representation where asynchronous operations can be issued

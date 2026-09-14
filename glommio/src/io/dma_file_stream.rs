@@ -27,7 +27,7 @@ use std::{
     vec::Vec,
 };
 
-type Result<T> = crate::Result<T, ()>;
+use crate::Result;
 
 macro_rules! current_error {
     ( $state:expr ) => {

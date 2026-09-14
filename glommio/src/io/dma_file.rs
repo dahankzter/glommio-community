@@ -35,7 +35,7 @@ use super::{
     Stat,
 };
 
-pub(super) type Result<T> = crate::Result<T, ()>;
+pub(super) use crate::Result;
 
 /// Close result of [`DmaFile::close_rc()`] and [`DmaFile::close`]. Indicates which operation is
 /// performed on close.
