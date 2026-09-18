@@ -163,6 +163,16 @@ pub(crate) struct Reactor {
     preempt_status: CompletionStatus,
 }
 
+/// Turns a path into the form both the ring and the blocking pool submit.
+///
+/// A path holding an interior NUL cannot name a file, so it becomes the empty
+/// path and the operation answers `ENOENT`. Both paths agree on that, which
+/// they did not before: the blocking pool answered `EFAULT` and `open_at`
+/// still panics on the same input.
+fn submittable_path(path: &Path) -> CString {
+    CString::new(path.as_os_str().as_bytes()).unwrap_or_default()
+}
+
 impl Reactor {
     pub(crate) fn new(
         notifier: Arc<SleepNotifier>,
@@ -612,7 +622,10 @@ impl Reactor {
     {
         let source = self.new_source(
             -1,
-            SourceType::Rename(old_path.as_ref().to_owned(), new_path.as_ref().to_owned()),
+            SourceType::Rename(
+                submittable_path(old_path.as_ref()),
+                submittable_path(new_path.as_ref()),
+            ),
             None,
         );
         let waiter = self.sys.rename(&source);
@@ -624,7 +637,11 @@ impl Reactor {
     }
 
     pub(crate) fn remove_file<P: AsRef<Path>>(&self, path: P) -> impl Future<Output = Source> {
-        let source = self.new_source(-1, SourceType::Remove(path.as_ref().to_owned()), None);
+        let source = self.new_source(
+            -1,
+            SourceType::Remove(submittable_path(path.as_ref())),
+            None,
+        );
         let waiter = self.sys.remove_file(&source);
 
         async move {
@@ -638,7 +655,11 @@ impl Reactor {
         path: P,
         mode: libc::c_int,
     ) -> impl Future<Output = Source> {
-        let source = self.new_source(-1, SourceType::CreateDir(path.as_ref().to_owned()), None);
+        let source = self.new_source(
+            -1,
+            SourceType::CreateDir(submittable_path(path.as_ref())),
+            None,
+        );
         let waiter = self.sys.create_dir(&source, mode);
 
         async move {
