@@ -1,5 +1,5 @@
 [workspace]
-members  = ["examples", "glommio"]
+members  = ["examples", "glommio", "glommio-macros"]
 resolver = "2"
 
 [workspace.metadata.dylint]
