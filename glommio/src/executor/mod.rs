@@ -3028,6 +3028,31 @@ mod test {
             .count()
     }
 
+    /// Waits for the eventfd count to come back to `expected`, up to a limit.
+    ///
+    /// A descriptor is closed when the last owner drops it, and the last owner
+    /// is not always the thread `join` returned from: a peer that has not yet
+    /// noticed a disconnect still holds a notifier for a moment. Asserting the
+    /// instant a round ends reads that moment as a leak. A leak does not
+    /// converge, so waiting costs a real one nothing and a transient one a few
+    /// milliseconds.
+    fn await_eventfd_count(expected: usize, what: &str) {
+        const LIMIT: Duration = Duration::from_secs(5);
+
+        let deadline = Instant::now() + LIMIT;
+        loop {
+            let count = eventfd_count();
+            if count == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{what}: {count} eventfds against {expected} expected, still there after {LIMIT:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn run_shared_channel_round() {
         let (sender, receiver) = crate::channels::shared_channel::new_bounded(1);
 
@@ -3077,20 +3102,12 @@ mod test {
             for _ in 0..10 {
                 run_shared_channel_round();
             }
-            assert_eq!(
-                eventfd_count(),
-                initial_eventfds,
-                "eventfds leaked after 10 rounds"
-            );
+            await_eventfd_count(initial_eventfds, "after 10 rounds");
 
             for _ in 0..90 {
                 run_shared_channel_round();
             }
-            assert_eq!(
-                eventfd_count(),
-                initial_eventfds,
-                "eventfds leaked after 100 rounds"
-            );
+            await_eventfd_count(initial_eventfds, "after 100 rounds");
         }
     }
 
