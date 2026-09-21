@@ -99,19 +99,34 @@ impl<T> OnceCell<T> {
         self.get().is_some()
     }
 
-    /// Sets the value if the cell is empty.
+    /// Sets the value if the cell is empty and nothing is initialising it.
     ///
     /// # Errors
     ///
-    /// Hands `value` back if the cell already holds one.
+    /// Hands `value` back in two cases: the cell already holds one, or a
+    /// [`get_or_init`](Self::get_or_init) is in flight and suspended in its
+    /// initialiser. Overwriting the second would leave that caller waiting for
+    /// a computation whose result is then thrown away, so it is reported
+    /// instead. `tokio::sync::OnceCell` draws the same line, with a richer
+    /// error that names which of the two happened.
+    ///
+    /// The two are not distinguished here because [`std::cell::OnceCell::set`]
+    /// returns `Result<(), T>` and this keeps that shape. Ask
+    /// [`is_initialized`](Self::is_initialized) if the difference matters.
     pub fn set(&self, value: T) -> Result<(), T> {
-        if self.is_initialized() {
+        // The permit is what makes this safe against an initialiser, and
+        // taking it fails in exactly the two cases where the value is not this
+        // caller's to set: another task holds it, so a `get_or_init` is
+        // suspended mid-await and will publish when it wakes; or the semaphore
+        // is closed, so a value already landed.
+        let Ok(_permit) = self.initialising.try_acquire_permit(1) else {
             return Err(value);
-        }
+        };
 
-        // Safety: as in `get`, and nothing can be mid-initialisation here:
-        // `set` does not await, so no other task can be running.
+        // Safety: as in `get`. The permit is held, so no initialiser can be
+        // between its emptiness check and its write.
         unsafe { *self.value.get() = Some(value) };
+        self.initialising.close();
         Ok(())
     }
 
@@ -158,13 +173,10 @@ impl<T> OnceCell<T> {
     /// });
     /// ```
     pub fn take(&mut self) -> Option<T> {
-        let value = self.value.get_mut().take();
-        if value.is_some() {
-            // The semaphore was closed when the value landed. An emptied cell
-            // has to be initialisable again, so it gets a fresh one.
-            self.initialising = Semaphore::new(1);
-        }
-        value
+        // Swapped for a fresh cell rather than emptied in place: the semaphore
+        // was closed when the value landed, and an emptied cell has to be
+        // initialisable again.
+        std::mem::take(self).value.into_inner()
     }
 
     /// Consumes the cell and returns the value it holds, if any.
@@ -224,17 +236,9 @@ impl<T> OnceCell<T> {
                 flag: &self.in_initialiser,
             }
             .await?;
-            // Re-checked after the await, not before it. `set` publishes
-            // without taking a permit, so it can land while `init` is
-            // suspended, and overwriting then would drop a value that `get`
-            // has already handed out a reference to. First publication wins;
-            // a later initialiser's value is dropped instead.
-            //
-            // Safety: nothing awaits between the check and the write, so on a
-            // single-threaded executor no other task can publish in between.
-            if self.get().is_none() {
-                unsafe { *self.value.get() = Some(value) };
-            }
+            // Safety: as in `get`. Nothing else can publish while this
+            // permit is held, which is what `set` taking it too buys.
+            unsafe { *self.value.get() = Some(value) };
             // Releases everyone queued behind this initialisation in one pass.
             // A failed initialiser does not get here, so the next caller still
             // takes the permit and runs its own.
@@ -249,43 +253,26 @@ impl<T> OnceCell<T> {
     /// If another task is already initialising the cell, this waits for that
     /// one to finish rather than running `init` -- so the initialiser runs
     /// exactly once however many callers arrive.
+    ///
+    /// # Panics
+    ///
+    /// If called from inside this cell's own initialiser. See
+    /// [`get_or_try_init`](Self::get_or_try_init).
     pub async fn get_or_init<F, Fut>(&self, init: F) -> &T
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
     {
-        if let Some(value) = self.get() {
-            return value;
+        // The infallible case is the fallible one whose initialiser cannot
+        // fail, which is how `std` builds it too: one path to audit rather
+        // than two that have to agree.
+        match self
+            .get_or_try_init(|| async { Ok::<T, std::convert::Infallible>(init().await) })
+            .await
+        {
+            Ok(value) => value,
+            Err(never) => match never {},
         }
-
-        self.refuse_reentry();
-
-        // Whoever takes the permit does the work; everyone else queues here
-        // and finds the value already present when they get it.
-        let Ok(_permit) = self.initialising.acquire_permit(1).await else {
-            return self
-                .get()
-                .expect("the semaphore is closed only after a value lands");
-        };
-
-        if self.get().is_none() {
-            let value = Guarded {
-                inner: init(),
-                flag: &self.in_initialiser,
-            }
-            .await;
-            // See `get_or_try_init`: the check has to be on this side of the
-            // await, because `set` does not take the permit.
-            //
-            // Safety: nothing awaits between the check and the write, so no
-            // other task can publish in between.
-            if self.get().is_none() {
-                unsafe { *self.value.get() = Some(value) };
-            }
-            self.initialising.close();
-        }
-
-        self.get().expect("the cell was just initialised")
     }
 }
 
@@ -333,11 +320,15 @@ impl<T: Eq> Eq for OnceCell<T> {}
 impl<T> From<T> for OnceCell<T> {
     /// Builds a cell already holding `value`.
     fn from(value: T) -> Self {
-        OnceCell {
+        let cell = OnceCell {
             value: UnsafeCell::new(Some(value)),
             initialising: Semaphore::new(1),
             in_initialiser: Cell::new(false),
-        }
+        };
+        // Closed because the cell arrives initialised: an open semaphore would
+        // let `set` take a permit and overwrite the value it was built with.
+        cell.initialising.close();
+        cell
     }
 }
 
@@ -551,42 +542,76 @@ mod write_once {
     use crate::{timer::sleep, LocalExecutor};
     use std::{rc::Rc, time::Duration};
 
-    /// `set` takes no permit, so it can publish while an initialiser holding
-    /// the permit is suspended in `init().await`. If `get_or_init` then wrote
-    /// on the strength of a check it made before that await, it would replace
-    /// a value `get` may already have handed out a reference to: for any `T`
-    /// with a destructor, that drops the value out from under a live `&T`.
+    /// A `set` that wins the race is what every later caller sees.
     ///
-    /// First publication wins, and the later value is dropped instead.
+    /// The mirror of the test below: the permit makes the two orderings
+    /// symmetrical, so whichever gets there first is the value, and the loser
+    /// is told rather than silently discarded.
     #[test]
-    fn a_value_published_while_an_initialiser_runs_is_not_replaced() {
+    fn an_initialiser_arriving_after_set_returns_the_value_that_is_there() {
+        LocalExecutor::default().run(async {
+            let cell: OnceCell<u32> = OnceCell::new();
+
+            assert_eq!(cell.set(1), Ok(()));
+
+            let mut ran = false;
+            let value = cell
+                .get_or_init(|| {
+                    ran = true;
+                    async { 2 }
+                })
+                .await;
+
+            assert_eq!(*value, 1, "the value that was set stands");
+            assert!(!ran, "and the initialiser was never run");
+        });
+    }
+
+    /// `set` is refused while an initialiser holds the permit.
+    ///
+    /// It used to succeed, and the initialiser then threw its own value away
+    /// when it woke: the caller of `get_or_init` waited for a computation
+    /// whose result was discarded, which is a surprising thing to do quietly.
+    /// `tokio::sync::OnceCell` reports this instead, and so does this now.
+    ///
+    /// The permit is also what makes the write safe. `get` hands out `&T`, so
+    /// a second publication would have to either replace a value a reader
+    /// already holds a reference to, or be dropped; holding the permit across
+    /// the await means neither can arise.
+    #[test]
+    fn set_is_refused_while_an_initialiser_holds_the_permit() {
         LocalExecutor::default().run(async {
             let cell: Rc<OnceCell<u32>> = Rc::new(OnceCell::new());
 
             let initialiser = crate::spawn_local({
                 let cell = cell.clone();
                 async move {
-                    cell.get_or_init(|| async {
-                        sleep(Duration::from_millis(20)).await;
-                        2
-                    })
-                    .await;
+                    *cell
+                        .get_or_init(|| async {
+                            sleep(Duration::from_millis(20)).await;
+                            2
+                        })
+                        .await
                 }
             });
 
             // Let the initialiser take the permit and park inside `init`.
             sleep(Duration::from_millis(5)).await;
 
-            assert_eq!(cell.set(1), Ok(()), "the cell is still empty");
-            let published = cell.get().expect("just set");
-            assert_eq!(*published, 1);
+            assert_eq!(
+                cell.set(1),
+                Err(1),
+                "an initialiser is mid-flight, so the value is not ours to set"
+            );
+            assert_eq!(cell.get(), None, "and nothing was published");
 
-            initialiser.await;
+            assert_eq!(initialiser.await, 2, "the initialiser's own value stands");
+            assert_eq!(cell.get(), Some(&2));
 
             assert_eq!(
-                cell.get(),
-                Some(&1),
-                "the initialiser replaced a value that was already published"
+                cell.set(3),
+                Err(3),
+                "and a set after the fact is refused as well"
             );
         });
     }
