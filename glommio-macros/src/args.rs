@@ -18,8 +18,33 @@ pub(crate) struct Args {
     pub(crate) krate: Path,
 }
 
+/// The `Placement` variants a caller may name without qualifying them.
+///
+/// Anything else given to `placement` is emitted as written, so a call, a
+/// path through another module, or a local binding all work. The shorthand is
+/// only a shorthand.
+const BARE_VARIANTS: &[&str] = &["Unbound", "Fenced", "Fixed"];
+
+/// Whether `expr` names a [`BARE_VARIANTS`] variant, bare, and so wants
+/// `Placement::` in front of it.
+fn is_bare_variant(expr: &syn::Expr) -> bool {
+    let path = match expr {
+        syn::Expr::Path(path) => &path.path,
+        syn::Expr::Call(call) => match &*call.func {
+            syn::Expr::Path(path) => &path.path,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    path.leading_colon.is_none()
+        && path.segments.len() == 1
+        && BARE_VARIANTS
+            .iter()
+            .any(|variant| path.segments[0].ident == variant)
+}
+
 enum Arg {
-    Placement(TokenStream),
+    Placement(syn::Expr),
     Name(LitStr),
     Crate(Path),
 }
@@ -37,21 +62,7 @@ impl Parse for Arg {
         input.parse::<Token![=]>()?;
 
         match key.to_string().as_str() {
-            "placement" => {
-                let variant: syn::Expr = input.parse()?;
-                match &variant {
-                    syn::Expr::Path(_) | syn::Expr::Call(_) => {}
-                    _ => {
-                        return Err(syn::Error::new_spanned(
-                            &variant,
-                            "placement takes a Placement variant such as `Unbound`, `Fixed(0)` \
-                             or `Fenced(cpus)`, not an arbitrary expression. Build the executor \
-                             with LocalExecutorBuilder if you need a computed placement",
-                        ))
-                    }
-                }
-                Ok(Arg::Placement(quote!(#variant)))
-            }
+            "placement" => Ok(Arg::Placement(input.parse()?)),
             "name" => Ok(Arg::Name(input.parse()?)),
             other => Err(syn::Error::new_spanned(
                 &key,
@@ -80,7 +91,11 @@ pub(crate) fn parse(args: proc_macro::TokenStream, default_placement: &str) -> s
 
     let krate = krate.unwrap_or_else(|| syn::parse_quote!(::glommio));
     let placement = match placement {
-        Some(variant) => quote!(#krate::Placement::#variant),
+        // A bare variant name is qualified for the caller; anything else is
+        // theirs and goes through untouched, so a computed placement needs no
+        // escape from the attribute.
+        Some(expr) if is_bare_variant(&expr) => quote!(#krate::Placement::#expr),
+        Some(expr) => quote!(#expr),
         None => {
             let default: Ident = Ident::new(default_placement, proc_macro2::Span::call_site());
             quote!(#krate::Placement::#default)

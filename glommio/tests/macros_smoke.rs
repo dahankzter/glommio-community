@@ -1,6 +1,6 @@
-// Unless explicitly stated otherwise all files in this repository are licensed
-// under the MIT/Apache-2.0 License, at your convenience
-//
+//! Unless explicitly stated otherwise all files in this repository are licensed
+//! under the MIT/Apache-2.0 License, at your convenience
+//!
 #![cfg(feature = "macros")]
 //! `#[glommio::test]` from the position a user writes it in.
 //!
@@ -138,4 +138,26 @@ async fn ignore_composes() {
 #[glommio::test]
 async fn should_panic_composes_either_order() {
     panic!("deliberate");
+}
+
+/// A placement that is not a bare variant name reaches the expansion as
+/// written, which is what `Fixed` and `Fenced` need when the value is computed
+/// rather than spelled out.
+fn computed_placement() -> glommio::Placement {
+    glommio::Placement::Fixed(0)
+}
+
+#[glommio::test(placement = computed_placement())]
+async fn a_computed_placement_is_emitted_as_written() {
+    assert_eq!(thread_cpus_allowed(), vec![0]);
+}
+
+#[glommio::test(placement = glommio::Placement::Fixed(0))]
+async fn a_fully_qualified_placement_is_left_alone() {
+    assert_eq!(thread_cpus_allowed(), vec![0]);
+}
+
+#[glommio::test(placement = Fixed(0))]
+async fn a_bare_variant_is_still_shorthand() {
+    assert_eq!(thread_cpus_allowed(), vec![0]);
 }

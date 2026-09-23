@@ -1,9 +1,5 @@
 [package]
-authors = [
-  "DataDog <info@datadoghq.com>",
-  "Glauber Costa <glommer@gmail.com>",
-  "Hippolyte Barraud <hippolyte.barraud@datadoghq.com>",
-]
+authors = ["Henrik Ma Johansson <dahankzter@gmail.com>"]
 categories = ["asynchronous", "concurrency"]
 description = "Attribute macros for glommio: #[glommio::main] and #[glommio::test]."
 edition = "2021"
@@ -13,7 +9,7 @@ license = "Apache-2.0 OR MIT"
 name = "glommio-macros"
 repository = "https://github.com/glommio/glommio"
 rust-version = "1.92"
-version = "0.10.0"
+version.workspace = true
 
 [lib]
 proc-macro = true

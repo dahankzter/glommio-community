@@ -1,4 +1,4 @@
-error[E0433]: failed to resolve: use of unresolved module or unlinked crate `definitely_not_a_real_crate`
+error[E0433]: cannot find module or crate `definitely_not_a_real_crate` in this scope
  --> tests/ui/crate_override_is_honoured.rs:4:32
   |
 4 | #[glommio_macros::main(crate = definitely_not_a_real_crate)]
