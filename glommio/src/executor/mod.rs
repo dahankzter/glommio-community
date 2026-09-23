@@ -2172,6 +2172,7 @@ pub struct ExecutorProxy {}
 /// into. The panic hook still reports it whichever of these is chosen; this
 /// decides what happens afterwards.
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub enum UnobservedPanic {
     /// Carry on. This is `tokio`'s default for a task whose handle is gone.
     #[default]
@@ -2930,6 +2931,21 @@ impl ExecutorProxy {
             .map(|x| ScopedTask::<'a, T>(x, PhantomData));
     }
 
+    /// The policy the running executor was built with.
+    fn current_unobserved_panic() -> UnobservedPanic {
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
+        return LOCAL_EX.with(|local_ex| local_ex.on_unobserved_panic.clone());
+
+        #[cfg(all(nightly, feature = "native-tls"))]
+        unsafe {
+            LOCAL_EX
+                .as_ref()
+                .expect("this thread doesn't have a LocalExecutor running")
+                .on_unobserved_panic
+                .clone()
+        }
+    }
+
     /// Spawns a blocking task into a background thread where blocking is
     /// acceptable.
     ///
@@ -2973,21 +2989,6 @@ impl ExecutorProxy {
     /// keeps serving later work.
     ///
     /// `func` is not required to be [`std::panic::UnwindSafe`].
-    /// The policy the running executor was built with.
-    fn current_unobserved_panic() -> UnobservedPanic {
-        #[cfg(any(not(nightly), not(feature = "native-tls")))]
-        return LOCAL_EX.with(|local_ex| local_ex.on_unobserved_panic.clone());
-
-        #[cfg(all(nightly, feature = "native-tls"))]
-        unsafe {
-            LOCAL_EX
-                .as_ref()
-                .expect("this thread doesn't have a LocalExecutor running")
-                .on_unobserved_panic
-                .clone()
-        }
-    }
-
     pub fn spawn_blocking<F, R>(&self, func: F) -> impl Future<Output = R>
     where
         F: FnOnce() -> R + Send + 'static,
