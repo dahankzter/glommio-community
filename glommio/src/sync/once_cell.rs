@@ -71,6 +71,31 @@ impl<Fut: Future> Future for Guarded<'_, Fut> {
     }
 }
 
+/// Polls `inner` while refusing to proceed from inside this cell's own
+/// initialiser.
+///
+/// Checked on every poll rather than once on entry. A future can be created
+/// outside the initialiser, where the check passes because the flag is still
+/// clear, and then handed in and awaited inside it.
+struct RefusingReentry<'a, Fut> {
+    inner: Fut,
+    flag: &'a Cell<bool>,
+}
+
+impl<Fut: Future> Future for RefusingReentry<'_, Fut> {
+    type Output = Fut::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Fut::Output> {
+        // Safety: as in `Guarded`.
+        let this = unsafe { self.get_unchecked_mut() };
+        assert!(
+            !this.flag.get(),
+            "OnceCell initialiser re-entered its own cell; it would wait for itself forever"
+        );
+        unsafe { Pin::new_unchecked(&mut this.inner) }.poll(cx)
+    }
+}
+
 impl<T> OnceCell<T> {
     /// Creates an empty cell.
     pub fn new() -> Self {
@@ -89,8 +114,7 @@ impl<T> OnceCell<T> {
         // borrow checker will not hand out while the reference returned here
         // is alive. Every writer checks the cell is empty
         // and writes without awaiting in between, which on a single-threaded
-        // executor is what makes "at most once" true. Note the semaphore alone
-        // does not: `set` never takes it.
+        // executor is what makes "at most once" true.
         unsafe { (*self.value.get()).as_ref() }
     }
 
@@ -128,15 +152,6 @@ impl<T> OnceCell<T> {
         unsafe { *self.value.get() = Some(value) };
         self.initialising.close();
         Ok(())
-    }
-
-    /// Panics if called from inside this cell's own initialiser, which would
-    /// otherwise queue behind the permit that initialiser already holds.
-    fn refuse_reentry(&self) {
-        assert!(
-            !self.in_initialiser.get(),
-            "OnceCell initialiser re-entered its own cell; it would wait for itself forever"
-        );
     }
 
     /// Returns a mutable reference to the value, or `None` if the cell is
@@ -217,9 +232,12 @@ impl<T> OnceCell<T> {
             return Ok(value);
         }
 
-        self.refuse_reentry();
-
-        let Ok(_permit) = self.initialising.acquire_permit(1).await else {
+        let Ok(_permit) = (RefusingReentry {
+            inner: self.initialising.acquire_permit(1),
+            flag: &self.in_initialiser,
+        })
+        .await
+        else {
             // Closed means a previous initialiser published and released every
             // waiter at once, rather than handing the permit down the queue.
             return Ok(self
@@ -231,8 +249,16 @@ impl<T> OnceCell<T> {
         // succeeded, in which case there is nothing to do -- or failed, in
         // which case the cell is still empty and this caller tries.
         if self.get().is_none() {
+            // Armed across the call to `init`, not only across the future it
+            // hands back: a closure is free to do its re-entering before
+            // returning anything there is to poll.
+            let building = {
+                self.in_initialiser.set(true);
+                let _armed = scopeguard::guard((), |()| self.in_initialiser.set(false));
+                init()
+            };
             let value = Guarded {
-                inner: init(),
+                inner: building,
                 flag: &self.in_initialiser,
             }
             .await?;
@@ -251,13 +277,37 @@ impl<T> OnceCell<T> {
     /// Returns the value, running `init` to produce it if the cell is empty.
     ///
     /// If another task is already initialising the cell, this waits for that
-    /// one to finish rather than running `init` -- so the initialiser runs
-    /// exactly once however many callers arrive.
+    /// one to finish rather than running `init`, so however many callers
+    /// arrive only one initialiser runs at a time. That is not the same as
+    /// running once: an initialiser that panics or is dropped part-way leaves
+    /// the cell empty, and the next caller runs its own.
     ///
     /// # Panics
     ///
     /// If called from inside this cell's own initialiser. See
     /// [`get_or_try_init`](Self::get_or_try_init).
+    ///
+    /// Reaching the cell from a task the initialiser *spawned* is not that
+    /// case and is not detected: the initialiser is suspended awaiting the
+    /// spawned task, which looks like any other caller queueing behind it, and
+    /// both then wait forever.
+    ///
+    /// ```no_run
+    /// # use glommio::{sync::OnceCell, LocalExecutor};
+    /// # use std::rc::Rc;
+    /// # let ex = LocalExecutor::default();
+    /// # ex.run(async {
+    /// let cell: Rc<OnceCell<u32>> = Rc::new(OnceCell::new());
+    /// let interior = cell.clone();
+    /// // Deadlocks: the spawned task queues behind an initialiser that is
+    /// // itself waiting for that task.
+    /// cell.get_or_init(|| async move {
+    ///     glommio::spawn_local(async move { *interior.get_or_init(|| async { 42 }).await })
+    ///         .await
+    /// })
+    /// .await;
+    /// # });
+    /// ```
     pub async fn get_or_init<F, Fut>(&self, init: F) -> &T
     where
         F: FnOnce() -> Fut,
@@ -266,13 +316,9 @@ impl<T> OnceCell<T> {
         // The infallible case is the fallible one whose initialiser cannot
         // fail, which is how `std` builds it too: one path to audit rather
         // than two that have to agree.
-        match self
-            .get_or_try_init(|| async { Ok::<T, std::convert::Infallible>(init().await) })
+        self.get_or_try_init(|| async { Ok::<T, std::convert::Infallible>(init().await) })
             .await
-        {
-            Ok(value) => value,
-            Err(never) => match never {},
-        }
+            .unwrap()
     }
 }
 
@@ -797,7 +843,7 @@ mod std_trait_tests {
 mod reentrancy_tests {
     use super::*;
     use crate::{timer::sleep, LocalExecutor};
-    use std::{rc::Rc, time::Duration};
+    use std::{cell::RefCell, future::poll_fn, rc::Rc, task::Waker, time::Duration};
 
     /// Re-entering from the initialiser's own call stack is the case that can
     /// never make progress, so it panics rather than waiting for itself.
@@ -896,5 +942,54 @@ mod reentrancy_tests {
                 })
                 .await;
         });
+    }
+
+    /// The flag has to be raised across the call to `init`, not only across
+    /// the future it returns: a closure can re-enter synchronously, before
+    /// there is anything to poll.
+    #[test]
+    #[should_panic(expected = "re-entered its own cell")]
+    fn an_initialiser_that_reenters_before_returning_a_future_panics() {
+        let cell = OnceCell::<u32>::new();
+        let mut outer = Box::pin(cell.get_or_try_init(|| {
+            let mut inner = Box::pin(cell.get_or_init(|| async { 1 }));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(inner.as_mut().poll(&mut cx).is_pending());
+            async move { Ok::<_, ()>(*inner.await) }
+        }));
+
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(outer.as_mut().poll(&mut cx).is_pending());
+        assert!(cell.get().is_none());
+    }
+
+    /// Checking once on entry is not enough. This waiter is created and polled
+    /// while the flag is still clear, and only then handed to the initialiser
+    /// to await, so the check has to run on every poll.
+    #[test]
+    #[should_panic(expected = "re-entered its own cell")]
+    fn a_waiter_polled_before_entry_panics_when_awaited_inside_it() {
+        type Waiting<'a> = Pin<Box<dyn Future<Output = &'a u32> + 'a>>;
+
+        let cell = OnceCell::<u32>::new();
+        let slot: RefCell<Option<Waiting<'_>>> = RefCell::new(None);
+        let mut outer = Box::pin(cell.get_or_init(|| async {
+            let inner = poll_fn(|_| match slot.borrow_mut().take() {
+                Some(inner) => Poll::Ready(inner),
+                None => Poll::Pending,
+            })
+            .await;
+            *inner.await
+        }));
+
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(outer.as_mut().poll(&mut cx).is_pending());
+
+        let mut inner: Waiting<'_> = Box::pin(cell.get_or_init(|| async { 2 }));
+        assert!(inner.as_mut().poll(&mut cx).is_pending());
+        *slot.borrow_mut() = Some(inner);
+
+        assert!(outer.as_mut().poll(&mut cx).is_pending());
+        assert!(cell.get().is_none());
     }
 }
