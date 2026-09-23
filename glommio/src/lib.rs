@@ -278,6 +278,13 @@ extern crate lazy_static;
 #[macro_use(defer)]
 extern crate scopeguard;
 
+// `#[glommio::test]` expands to `::glommio::…`, which does not resolve inside
+// the crate that defines it. Aliasing the crate to its own name makes the one
+// expansion work everywhere, rather than the macro having to guess where it is
+// being used: nothing in the environment distinguishes a doc test from the
+// library, both report `glommio` for `CARGO_PKG_NAME` and `CARGO_CRATE_NAME`.
+extern crate self as glommio;
+
 /// Call [`Waker::wake()`] and log to `error` if panicked.
 macro_rules! wake {
     ($waker:expr $(,)?) => {
@@ -900,5 +907,21 @@ pub(crate) mod test_utils {
         warn!("Started tracing..");
         trace!("Started tracing..");
         error!("Started tracing..");
+    }
+}
+
+#[cfg(all(test, feature = "macros"))]
+mod attribute_inside_the_crate {
+    //! The attributes name the runtime as `::glommio`, so this is where that
+    //! path would stop resolving if the self-alias above were dropped.
+
+    #[glommio::test]
+    async fn the_test_attribute_resolves_inside_glommio() {
+        crate::timer::sleep(std::time::Duration::from_millis(1)).await;
+    }
+
+    #[glommio::test(placement = Fixed(0))]
+    async fn a_placement_argument_resolves_too() {
+        assert!(crate::executor().id() > 0);
     }
 }
