@@ -298,12 +298,6 @@ impl<S: AsRawFd> NonBufferedStream<S> {
     }
 
     /// Writes several buffers in one syscall.
-    ///
-    /// Same shape as [`poll_write`](Self::poll_write) -- speculate first, fall
-    /// back to a readiness registration -- with `sendmsg` in place of `send`.
-    /// The point is the caller: an HTTP response is a status line, headers and
-    /// a body, and without this it costs three syscalls and, with
-    /// `TCP_NODELAY` set, up to three segments on the wire.
     pub(crate) fn poll_write_vectored(
         &mut self,
         cx: &Context<'_>,
