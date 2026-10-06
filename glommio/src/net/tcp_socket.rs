@@ -877,12 +877,10 @@ mod tests {
         });
     }
 
+    /// The futures-io default writes the first slice and returns, so without a
+    /// `poll_write_vectored` of our own a caller pays a syscall per buffer.
     #[test]
     fn write_vectored_writes_every_slice() {
-        // An HTTP response is a status line, headers and a body: three
-        // buffers the caller does not want to concatenate. Without a
-        // `poll_write_vectored` of our own, the futures-io default writes the
-        // first slice and returns, and the caller pays a syscall per piece.
         test_executor!(async move {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = listener.local_addr().unwrap();
