@@ -267,9 +267,18 @@ pub(super) struct Cyclic {
     slice_start: Instant,
 }
 
-/// How far below the end of its frame a slice must end before it counts as
-/// an overrun: a slice that ends on a task's yield always ends a little
-/// after the timer fired. The lateness is charged either way.
+/// How far past the end of its frame a slice may end and still count as
+/// having yielded in time: a slice that ends on a task's yield always ends a
+/// little after the timer fired, by up to the task's last stretch between
+/// checks. Within this, nothing is charged.
+///
+/// Charging all lateness was tried first, and charged queues for their
+/// normal granularity. This helps only queues that yield well within an
+/// eighth of a frame: beside a 100 us frame, a queue that yields every 20 us
+/// still overruns by this measure, is charged, and gives up an occasional
+/// slot, so a busy latency queue beside 16 CPU-heavy queues waited up to
+/// 1.98 ms against its 1.10 ms bound with or without the tolerance. The frame
+/// has to be several times longer than the longest stretch between yields.
 const OVERRUN_TOLERANCE_DIVISOR: u32 = 8;
 
 impl Cyclic {
@@ -357,22 +366,22 @@ impl Cyclic {
     }
 
     /// Charges the slice that ran for `runtime` from the last [`Self::enter`]
-    /// for whatever it ran past the end of its frame, adding it to `debt`.
-    /// The debt is capped at one major frame, which the queue has also been
-    /// charged in vruntime: one long stall does not lock a queue out of its
-    /// slots for longer than a cycle. Returns whether the lateness counts as
-    /// an overrun.
+    /// for what it ran past the end of its frame, adding it to `debt`, if
+    /// that is more than an eighth of a frame: an overrun, which it returns
+    /// whether it was. The debt is capped at one major frame, which the
+    /// queue has also been charged in vruntime: one long stall does not lock
+    /// a queue out of its slots for longer than a cycle.
     pub(super) fn charge(&self, runtime: Duration, debt: &mut Duration) -> bool {
         let deadline = self.frame_start + self.minor;
         let start = self.slice_start.max(deadline);
         let end = self.slice_start + runtime;
         let late = end.saturating_duration_since(start);
-        if late.is_zero() {
+        if late <= self.minor / OVERRUN_TOLERANCE_DIVISOR {
             return false;
         }
         let cap = self.minor.saturating_mul(self.major);
         *debt = (*debt + late).min(cap);
-        late > self.minor / OVERRUN_TOLERANCE_DIVISOR
+        true
     }
 
     /// The longest a queue that yields in time waits for its next slot: the
@@ -516,9 +525,9 @@ mod tests {
         assert!(!cyclic.charge(Duration::from_micros(900), &mut debt));
         assert_eq!(debt, Duration::ZERO);
         assert!(!cyclic.charge(Duration::from_micros(1050), &mut debt));
-        assert_eq!(debt, Duration::from_micros(50));
+        assert_eq!(debt, Duration::ZERO, "yielded within an eighth of a frame");
         assert!(cyclic.charge(Duration::from_millis(3), &mut debt));
-        assert_eq!(debt, Duration::from_micros(2050));
+        assert_eq!(debt, Duration::from_millis(2));
         assert!(cyclic.charge(Duration::from_millis(100), &mut debt));
         assert_eq!(debt, Duration::from_millis(4));
     }
