@@ -201,6 +201,12 @@ impl Reactor {
         self.sys.id()
     }
 
+    /// How many preempt timers have fired and how many have been armed.
+    #[inline]
+    pub(crate) fn preempt_epoch(&self) -> (u64, u64) {
+        self.sys.preempt_epoch()
+    }
+
     pub(crate) fn ring_depth(&self) -> usize {
         self.sys.ring_depth()
     }

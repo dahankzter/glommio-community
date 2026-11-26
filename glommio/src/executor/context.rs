@@ -249,10 +249,9 @@ impl ExecutorContext {
             &self.tasks,
         );
 
-        self.queues
-            .borrow_mut()
-            .available_executors
-            .insert(index, tq);
+        let mut queues = self.queues.borrow_mut();
+        queues.available_executors.insert(index, tq);
+        queues.cyclic_queues_changed();
         TaskQueueHandle { index }
     }
 
@@ -282,10 +281,16 @@ impl ExecutorContext {
             if entry.get().borrow().is_active() {
                 return Err(GlommioError::queue_still_active(handle.index));
             }
-            entry.remove()
+            let removed = entry.remove();
+            queues.cyclic_queues_changed();
+            removed
         };
         drop(removed);
         Ok(())
+    }
+
+    pub(super) fn slot_wait_bound(&self, handle: &TaskQueueHandle) -> Option<std::time::Duration> {
+        self.queues.borrow_mut().slot_wait_bound(handle.index)
     }
 
     pub(super) fn get_queue(&self, handle: &TaskQueueHandle) -> Option<Rc<RefCell<TaskQueue>>> {

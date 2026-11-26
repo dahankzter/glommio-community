@@ -48,8 +48,8 @@ use log::warn;
 pub use placement::{CpuSet, Placement, PoolPlacement};
 use smallvec::SmallVec;
 use std::{
-    cell::RefCell,
-    collections::{BinaryHeap, VecDeque},
+    cell::{Cell, RefCell},
+    collections::VecDeque,
     fmt,
     future::Future,
     io,
@@ -66,16 +66,20 @@ use std::{
 use tracing::trace;
 
 mod context;
+mod cyclic;
 mod latch;
 #[cfg(any(not(nightly), not(feature = "native-tls")))]
 mod local_context;
 mod multitask;
 mod placement;
+mod queue_heap;
 pub mod stall;
 #[cfg(test)]
 mod window_model;
 
 pub(crate) use context::{ExecutorContext, WeakExecutorContext};
+pub use cyclic::Scheduling;
+use queue_heap::QueueHeap;
 
 pub(crate) const DEFAULT_EXECUTOR_NAME: &str = "unnamed";
 pub(crate) const DEFAULT_PREEMPT_TIMER: Duration = Duration::from_millis(100);
@@ -380,6 +384,18 @@ pub(crate) struct TaskQueue {
     /// For dynamic shares classes.
     yielded: bool,
     stats: TaskQueueStats,
+    /// Where this queue sits in the heap of runnable queues, or
+    /// [`queue_heap::NOT_IN_HEAP`].
+    heap_slot: Cell<usize>,
+    /// The reciprocal shares the cyclic table was built with, so a change
+    /// of dynamic shares marks the table stale.
+    cyclic_shares: Cell<u64>,
+    /// What this queue ran past the ends of its frames and has not yet paid
+    /// for by giving up a frame. Cyclic scheduling only.
+    frame_debt: Duration,
+    /// The frame, by preempt-timer fires, this queue last gave up to pay
+    /// its debt.
+    paid_frame: u64,
 }
 
 /// Impl a custom order so we use a min-heap: the least vruntime first, and
@@ -442,6 +458,10 @@ impl TaskQueue {
             name: name.into(),
             last_adjustment: Instant::now(),
             yielded: false,
+            heap_slot: Cell::new(queue_heap::NOT_IN_HEAP),
+            cyclic_shares: Cell::new(0),
+            frame_debt: Duration::ZERO,
+            paid_frame: u64::MAX,
         }))
     }
 
@@ -583,6 +603,7 @@ pub struct TaskQueueStats {
     reciprocal_shares: u64,
     queue_selected: u64,
     runtime: Duration,
+    frame_overruns: u64,
 }
 
 impl TaskQueueStats {
@@ -592,6 +613,7 @@ impl TaskQueueStats {
             reciprocal_shares,
             runtime: Duration::from_nanos(0),
             queue_selected: 0,
+            frame_overruns: 0,
         }
     }
 
@@ -623,6 +645,14 @@ impl TaskQueueStats {
         self.queue_selected
     }
 
+    /// Under [`Scheduling::Cyclic`], how many of this queue's slices ran
+    /// past the end of their frame by more than an eighth of a frame since
+    /// its stats were last read: a task that did not yield in time. Always
+    /// zero under the vruntime scheduler.
+    pub fn frame_overruns(&self) -> u64 {
+        self.frame_overruns
+    }
+
     pub(crate) fn take(&mut self) -> Self {
         std::mem::replace(
             self,
@@ -631,6 +661,7 @@ impl TaskQueueStats {
                 reciprocal_shares: self.reciprocal_shares,
                 queue_selected: Default::default(),
                 runtime: Default::default(),
+                frame_overruns: Default::default(),
             },
         )
     }
@@ -749,7 +780,7 @@ impl Preempted {
 
 #[derive(Debug)]
 struct ExecutorQueues {
-    active_executors: BinaryHeap<Rc<RefCell<TaskQueue>>>,
+    active_executors: QueueHeap,
     available_executors: AHashMap<usize, Rc<RefCell<TaskQueue>>>,
     active_executing: Option<Rc<RefCell<TaskQueue>>>,
     executor_index: usize,
@@ -775,6 +806,7 @@ struct ExecutorQueues {
     default_preempt_timer_duration: Duration,
     spin_before_park: Option<Duration>,
     stats: ExecutorStats,
+    cyclic: Option<Box<cyclic::Cyclic>>,
 }
 
 impl ExecutorQueues {
@@ -782,7 +814,7 @@ impl ExecutorQueues {
     /// from 1.
     fn new(preempt_timer_duration: Duration, spin_before_park: Option<Duration>) -> Self {
         ExecutorQueues {
-            active_executors: BinaryHeap::new(),
+            active_executors: QueueHeap::new(),
             available_executors: AHashMap::new(),
             active_executing: None,
             executor_index: 1,
@@ -795,7 +827,104 @@ impl ExecutorQueues {
             default_preempt_timer_duration: preempt_timer_duration,
             spin_before_park,
             stats: ExecutorStats::new(),
+            cyclic: None,
         }
+    }
+
+    /// Switches to the cyclic policy, ticking every `minor`.
+    fn set_cyclic(&mut self, minor: Duration, major: u32) {
+        self.cyclic = Some(Box::new(cyclic::Cyclic::new(minor, major)));
+        self.preempt_timer_duration = minor;
+        self.default_preempt_timer_duration = minor;
+    }
+
+    /// Marks the cyclic table stale, as queues were created or removed.
+    fn cyclic_queues_changed(&mut self) {
+        if let Some(cyclic) = self.cyclic.as_deref_mut() {
+            cyclic.stale = true;
+        }
+    }
+
+    /// Takes the queue to run next out of the heap of runnable queues.
+    ///
+    /// Under the vruntime scheduler that is the heap's least queue. Under the
+    /// cyclic policy it is the owner of the current frame, if it is runnable
+    /// and owes no frame for an overrun, and the heap's least queue
+    /// otherwise, so that a frame its owner leaves idle is not wasted. A
+    /// least queue that owes a frame gives this one up too, to the next
+    /// queue, if there is one: only the first is ever passed over, so the
+    /// second runs whatever it owes. O(log q) in the runnable queues either
+    /// way: the owner is found through the table and taken from the heap by
+    /// its recorded position.
+    ///
+    /// The window model mirrors the vruntime branch, a plain pop, and not the
+    /// cyclic one: the window holds tasks within a queue whichever queue is
+    /// picked, but how the cyclic pick orders queues around a window is not
+    /// modelled.
+    #[inline]
+    fn pick_queue(&mut self, reactor: &reactor::Reactor) -> Option<Rc<RefCell<TaskQueue>>> {
+        if self.cyclic.is_none() {
+            return self.active_executors.pop();
+        }
+        self.pick_cyclic(reactor)
+    }
+
+    fn pick_cyclic(&mut self, reactor: &reactor::Reactor) -> Option<Rc<RefCell<TaskQueue>>> {
+        let cyclic = self.cyclic.as_deref_mut().unwrap();
+        if cyclic.stale {
+            cyclic.rebuild(self.available_executors.values());
+        }
+        let (fires, arms) = reactor.preempt_epoch();
+        let owner = cyclic.enter(fires, arms, Instant::now());
+        if let Some(queue) = self.available_executors.get(&owner) {
+            let runnable = queue.borrow().heap_slot.get() != queue_heap::NOT_IN_HEAP;
+            if runnable && !Self::skips(cyclic, queue) {
+                let queue = queue.clone();
+                self.active_executors.remove(&queue);
+                return Some(queue);
+            }
+        }
+        let least = self.active_executors.pop()?;
+        if self.active_executors.is_empty() || !Self::skips(cyclic, &least) {
+            return Some(least);
+        }
+        let next = self.active_executors.pop();
+        self.active_executors.push(least);
+        next
+    }
+
+    fn skips(cyclic: &cyclic::Cyclic, queue: &Rc<RefCell<TaskQueue>>) -> bool {
+        let mut state = queue.borrow_mut();
+        let state = &mut *state;
+        cyclic.skips(&mut state.frame_debt, &mut state.paid_frame)
+    }
+
+    /// Under the cyclic policy, charges `queue`'s slice of `runtime` for what
+    /// it ran past the end of its frame, counts an overrun, and marks the
+    /// table stale if the queue's dynamic shares changed.
+    #[inline]
+    fn account_frame(&mut self, queue: &Rc<RefCell<TaskQueue>>, runtime: Duration) {
+        let Some(cyclic) = self.cyclic.as_deref_mut() else {
+            return;
+        };
+        let mut state = queue.borrow_mut();
+        let state = &mut *state;
+        if cyclic.charge(runtime, &mut state.frame_debt) {
+            state.stats.frame_overruns += 1;
+        }
+        if state.cyclic_shares.get() != state.stats.reciprocal_shares {
+            cyclic.stale = true;
+        }
+    }
+
+    /// The cyclic table's bound on how long the queue at `index` waits for
+    /// its next slot, rebuilding a stale table first.
+    fn slot_wait_bound(&mut self, index: usize) -> Option<Duration> {
+        let cyclic = self.cyclic.as_deref_mut()?;
+        if cyclic.stale {
+            cyclic.rebuild(self.available_executors.values());
+        }
+        cyclic.wait_bound(index)
     }
 
     /// Sets the preempt timer to the tightest latency among runnable queues.
@@ -806,6 +935,9 @@ impl ExecutorQueues {
     /// timer to the default, which the next slice then runs under while the
     /// latency queue waits.
     fn reevaluate_preempt_timer(&mut self) {
+        if self.cyclic.is_some() {
+            return;
+        }
         self.preempt_timer_duration = self
             .active_executors
             .iter()
@@ -1021,8 +1153,7 @@ impl ExecutorQueues {
         for queue in self.available_executors.values() {
             queue.borrow_mut().vruntime = 0;
         }
-        let heap = std::mem::take(&mut self.active_executors).into_vec();
-        self.active_executors = BinaryHeap::from(heap);
+        self.active_executors.rebuild();
     }
 
     /// Pushes `queue` onto the heap of runnable queues, behind every queue of
@@ -1127,6 +1258,8 @@ pub struct LocalExecutorBuilder {
     /// Receive buffers lent to the kernel for multishot receive
     recv_buffers: RecvBuffers,
     on_unobserved_panic: UnobservedPanic,
+    /// How task queues are scheduled
+    scheduling: Scheduling,
 }
 
 impl LocalExecutorBuilder {
@@ -1148,7 +1281,25 @@ impl LocalExecutorBuilder {
             blocking_thread_pool_placement: PoolPlacement::from(placement),
             detect_stalls: None,
             recv_buffers: RecvBuffers::default(),
+            scheduling: Scheduling::default(),
         }
+    }
+
+    /// Chooses how task queues are scheduled. Defaults to
+    /// [`Scheduling::Vruntime`]. Experimental.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a [`Scheduling::Cyclic`] frame is zero long or its table has
+    /// no frames.
+    #[must_use = "The builder must be built to be useful"]
+    pub fn scheduling(mut self, scheduling: Scheduling) -> LocalExecutorBuilder {
+        if let Scheduling::Cyclic { minor, major } = scheduling {
+            assert!(!minor.is_zero(), "a minor frame must be longer than zero");
+            assert!(major >= 1, "a major frame must hold at least one frame");
+        }
+        self.scheduling = scheduling;
+        self
     }
 
     /// Spin for duration before parking a reactor
@@ -1355,6 +1506,7 @@ impl LocalExecutorBuilder {
                 detect_stalls: self.detect_stalls,
                 recv_buffers: self.recv_buffers,
                 on_unobserved_panic: self.on_unobserved_panic,
+                scheduling: self.scheduling,
             },
         )?;
         le.init();
@@ -1423,6 +1575,7 @@ impl LocalExecutorBuilder {
         let record_io_latencies = self.record_io_latencies;
         let blocking_thread_pool_placement = self.blocking_thread_pool_placement;
         let recv_buffers = self.recv_buffers;
+        let scheduling = self.scheduling;
 
         Builder::new()
             .name(name)
@@ -1440,6 +1593,7 @@ impl LocalExecutorBuilder {
                         detect_stalls,
                         recv_buffers,
                         on_unobserved_panic,
+                        scheduling,
                     },
                 )?;
                 le.init();
@@ -1759,6 +1913,7 @@ impl LocalExecutorPoolBuilder {
                             detect_stalls,
                             recv_buffers,
                             on_unobserved_panic,
+                            scheduling: Scheduling::default(),
                         },
                     )?;
                     le.init();
@@ -1847,6 +2002,7 @@ pub struct LocalExecutorConfig {
     pub(crate) recv_buffers: RecvBuffers,
     /// What to do with a blocking panic no task is waiting for.
     pub on_unobserved_panic: UnobservedPanic,
+    pub(crate) scheduling: Scheduling,
 }
 
 /// Single-threaded executor.
@@ -1941,10 +2097,11 @@ impl LocalExecutor {
             Some(cpu_set) => bind_to_cpu_set(cpu_set)?,
             None => config.spin_before_park = None,
         }
-        let queues = Rc::new(RefCell::new(ExecutorQueues::new(
-            config.preempt_timer,
-            config.spin_before_park,
-        )));
+        let mut queues = ExecutorQueues::new(config.preempt_timer, config.spin_before_park);
+        if let Scheduling::Cyclic { minor, major } = config.scheduling {
+            queues.set_cyclic(minor, major);
+        }
+        let queues = Rc::new(RefCell::new(queues));
         let id = notifier.id();
         let reactor = Rc::new(reactor::Reactor::new(
             notifier,
@@ -2120,7 +2277,7 @@ impl LocalExecutor {
     /// Modelled by the test-only `executor::window_model`: mirror changes there and rerun it.
     fn run_one_task_queue(&self) -> bool {
         let mut tq = self.context.queues.borrow_mut();
-        let candidate = tq.active_executors.pop();
+        let candidate = tq.pick_queue(&self.context.reactor);
         tq.stats.scheduler_runs += 1;
 
         if candidate.is_none() {
@@ -2223,6 +2380,7 @@ impl LocalExecutor {
         let mut tq = self.context.queues.borrow_mut();
         tq.active_executing = None;
         tq.in_slice = false;
+        tq.account_frame(&queue, runtime);
         tq.stats.executor_runtime += runtime;
         tq.stats.tasks_executed += tasks_executed_this_loop;
         let vruntime = match vruntime {
@@ -3367,6 +3525,27 @@ impl ExecutorProxy {
         } {
             Some(x) => Ok(x.borrow_mut().stats.take()),
             None => Err(GlommioError::queue_not_found(handle.index)),
+        };
+    }
+
+    /// Under [`Scheduling::Cyclic`], the longest the queue `handle` waits for
+    /// its next slot when every task yields within its frame: the longest
+    /// gap between two of its slots in the schedule table, plus one frame.
+    /// `None` under the vruntime scheduler, for a queue that owns no slot,
+    /// and for a queue that does not exist. Experimental.
+    ///
+    /// A task that does not yield in time delays every queue by its overrun,
+    /// which this bound does not include.
+    pub fn slot_wait_bound(&self, handle: TaskQueueHandle) -> Option<Duration> {
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
+        return LOCAL_EX.with(|local_ex| local_ex.slot_wait_bound(&handle));
+
+        #[cfg(all(nightly, feature = "native-tls"))]
+        return unsafe {
+            LOCAL_EX
+                .as_ref()
+                .expect("this thread doesn't have a LocalExecutor running")
+                .slot_wait_bound(&handle)
         };
     }
 

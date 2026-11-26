@@ -2096,6 +2096,11 @@ pub(crate) struct Reactor {
     /// unchanged request can keep it rather than cancel it and install an
     /// identical one.
     latency_preemption_armed_for: Cell<Option<Duration>>,
+    /// How many preempt timers have fired, counted as each is given up.
+    /// The cyclic scheduler's frame clock.
+    preempt_fires: Cell<u64>,
+    /// How many preempt timers have been armed.
+    preempt_arms: Cell<u64>,
     throughput_preemption_timeout_src: Cell<Option<Source>>,
 
     /// The main and latency rings' fds. With a socket ring the reactor
@@ -2359,6 +2364,8 @@ impl Reactor {
             socket_ring: socket_ring.map(RefCell::new),
             latency_preemption_timeout_src: Cell::new(None),
             latency_preemption_armed_for: Cell::new(None),
+            preempt_fires: Cell::new(0),
+            preempt_arms: Cell::new(0),
             throughput_preemption_timeout_src: Cell::new(None),
             blocking_thread,
             link_fds,
@@ -3192,8 +3199,7 @@ impl Reactor {
 
         let settled = if should_sleep {
             drop(settled);
-            drop(self.latency_preemption_timeout_src.take());
-            self.latency_preemption_armed_for.set(None);
+            self.give_up_preempt_timer(self.latency_preemption_timeout_src.take());
 
             if let Some(dur) = user_timer {
                 self.latency_preemption_timeout_src
@@ -3242,6 +3248,7 @@ impl Reactor {
             self.observe_preempt_timer(&preempt_timer, settled).decide()
         {
             self.latency_preemption_armed_for.set(Some(preempt));
+            self.preempt_arms.set(self.preempt_arms.get() + 1);
             self.latency_preemption_timeout_src
                 .set(Some(lat_ring.prepare_latency_preemption_timer(preempt)));
             flush_cancellations!(into &mut 0; lat_ring);
@@ -3269,8 +3276,7 @@ impl Reactor {
                 self.latency_preemption_timeout_src.set(Some(src));
             }
             unusable => {
-                drop(unusable);
-                self.latency_preemption_armed_for.set(None);
+                self.give_up_preempt_timer(unusable);
             }
         }
     }
@@ -3300,12 +3306,28 @@ impl Reactor {
                 armed_for
             }
             fired => {
-                drop(fired);
-                self.latency_preemption_armed_for.set(None);
+                self.give_up_preempt_timer(fired);
                 None
             }
         };
         PreemptObservation { armed_for, wanted }
+    }
+
+    /// Drops the held latency timer, counting it as a preempt timer that
+    /// fired if it was one and it has completed.
+    fn give_up_preempt_timer(&self, timer: Option<Source>) {
+        if let Some(src) = &timer {
+            if self.latency_preemption_armed_for.get().is_some() && src.result().is_some() {
+                self.preempt_fires.set(self.preempt_fires.get() + 1);
+            }
+        }
+        drop(timer);
+        self.latency_preemption_armed_for.set(None);
+    }
+
+    /// How many preempt timers have fired and how many have been armed.
+    pub(crate) fn preempt_epoch(&self) -> (u64, u64) {
+        (self.preempt_fires.get(), self.preempt_arms.get())
     }
 
     pub(crate) fn flush_syscall_thread(&self) -> usize {

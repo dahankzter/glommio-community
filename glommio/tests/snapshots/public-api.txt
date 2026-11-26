@@ -3405,6 +3405,63 @@ pub unsafe fn glommio::PoolPlacement::init(init: <T as crossbeam_epoch::atomic::
 impl<T> tracing::instrument::Instrument for glommio::PoolPlacement
 impl<T> tracing::instrument::WithSubscriber for glommio::PoolPlacement
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for glommio::PoolPlacement where T: ?core::marker::Sized
+#[non_exhaustive] pub enum glommio::prelude::executor::Scheduling
+pub glommio::prelude::executor::Scheduling::Cyclic
+pub glommio::prelude::executor::Scheduling::Cyclic::major: u32
+pub glommio::prelude::executor::Scheduling::Cyclic::minor: core::time::Duration
+pub glommio::prelude::executor::Scheduling::Vruntime
+impl core::clone::Clone for glommio::Scheduling
+pub fn glommio::Scheduling::clone(&self) -> glommio::Scheduling
+impl core::cmp::Eq for glommio::Scheduling
+impl core::cmp::PartialEq for glommio::Scheduling
+pub fn glommio::Scheduling::eq(&self, other: &glommio::Scheduling) -> bool
+impl core::default::Default for glommio::Scheduling
+pub fn glommio::Scheduling::default() -> glommio::Scheduling
+impl core::fmt::Debug for glommio::Scheduling
+pub fn glommio::Scheduling::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for glommio::Scheduling
+impl core::marker::StructuralPartialEq for glommio::Scheduling
+impl core::marker::Freeze for glommio::Scheduling
+impl core::marker::Send for glommio::Scheduling
+impl core::marker::Sync for glommio::Scheduling
+impl core::marker::Unpin for glommio::Scheduling
+impl core::marker::UnsafeUnpin for glommio::Scheduling
+impl core::panic::unwind_safe::RefUnwindSafe for glommio::Scheduling
+impl core::panic::unwind_safe::UnwindSafe for glommio::Scheduling
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for glommio::Scheduling where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for glommio::Scheduling where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for glommio::Scheduling where U: core::convert::From<T>
+pub fn glommio::Scheduling::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for glommio::Scheduling where U: core::convert::Into<T>
+pub type glommio::Scheduling::Error = core::convert::Infallible
+pub fn glommio::Scheduling::try_from(value: U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for glommio::Scheduling where U: core::convert::TryFrom<T>
+pub type glommio::Scheduling::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn glommio::Scheduling::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for glommio::Scheduling where T: core::clone::Clone
+pub type glommio::Scheduling::Owned = T
+pub fn glommio::Scheduling::clone_into(&self, target: &mut T)
+pub fn glommio::Scheduling::to_owned(&self) -> T
+impl<T> core::any::Any for glommio::Scheduling where T: 'static + ?core::marker::Sized
+pub fn glommio::Scheduling::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for glommio::Scheduling where T: ?core::marker::Sized
+pub fn glommio::Scheduling::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for glommio::Scheduling where T: ?core::marker::Sized
+pub fn glommio::Scheduling::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for glommio::Scheduling where T: core::clone::Clone
+pub unsafe fn glommio::Scheduling::clone_to_uninit(&self, dest: *mut u8)
+impl<T> core::convert::From<T> for glommio::Scheduling
+pub fn glommio::Scheduling::from(t: T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for glommio::Scheduling
+pub type glommio::Scheduling::Init = T
+pub const glommio::Scheduling::ALIGN: usize
+pub unsafe fn glommio::Scheduling::deref<'a>(ptr: usize) -> &'a T
+pub unsafe fn glommio::Scheduling::deref_mut<'a>(ptr: usize) -> &'a mut T
+pub unsafe fn glommio::Scheduling::drop(ptr: usize)
+pub unsafe fn glommio::Scheduling::init(init: <T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> tracing::instrument::Instrument for glommio::Scheduling
+impl<T> tracing::instrument::WithSubscriber for glommio::Scheduling
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for glommio::Scheduling where T: ?core::marker::Sized
 #[non_exhaustive] pub enum glommio::prelude::executor::UnobservedPanic
 pub glommio::prelude::executor::UnobservedPanic::Abort
 pub glommio::prelude::executor::UnobservedPanic::Handler(alloc::sync::Arc<(dyn core::ops::function::Fn(alloc::boxed::Box<(dyn core::any::Any + core::marker::Send)>) + core::marker::Send + core::marker::Sync)>)
@@ -3581,6 +3638,7 @@ pub fn glommio::ExecutorProxy::executor_stats(&self) -> glommio::ExecutorStats
 pub fn glommio::ExecutorProxy::id(&self) -> usize
 pub fn glommio::ExecutorProxy::io_stats(&self) -> glommio::IoStats
 pub fn glommio::ExecutorProxy::need_preempt(&self) -> bool
+pub fn glommio::ExecutorProxy::slot_wait_bound(&self, handle: glommio::TaskQueueHandle) -> core::option::Option<core::time::Duration>
 pub fn glommio::ExecutorProxy::spawn_blocking<F, R>(&self, func: F) -> impl core::future::future::Future<Output = R> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
 pub fn glommio::ExecutorProxy::spawn_local<T>(&self, future: impl core::future::future::Future<Output = T> + 'static) -> glommio::Task<T> where T: 'static
 pub fn glommio::ExecutorProxy::spawn_local_into<T>(&self, future: impl core::future::future::Future<Output = T> + 'static, handle: glommio::TaskQueueHandle) -> glommio::Result<glommio::Task<T>> where T: 'static
@@ -3742,6 +3800,7 @@ pub fn glommio::LocalExecutorBuilder::preempt_timer(self, dur: core::time::Durat
 pub fn glommio::LocalExecutorBuilder::record_io_latencies(self, enabled: bool) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::recv_buffers(self, buffers: impl core::convert::Into<glommio::RecvBuffers>) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::ring_depth(self, ring_depth: usize) -> glommio::LocalExecutorBuilder
+pub fn glommio::LocalExecutorBuilder::scheduling(self, scheduling: glommio::Scheduling) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::spawn<G, F, T>(self, fut_gen: G) -> glommio::Result<glommio::ExecutorJoinHandle<T>> where G: core::ops::function::FnOnce() -> F + core::marker::Send + 'static, F: core::future::future::Future<Output = T> + 'static, T: core::marker::Send + 'static
 pub fn glommio::LocalExecutorBuilder::spin_before_park(self, spin: core::time::Duration) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::unobserved_panic(self, policy: glommio::UnobservedPanic) -> Self
@@ -4167,6 +4226,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 pub struct glommio::prelude::executor::TaskQueueStats
 impl glommio::TaskQueueStats
 pub fn glommio::TaskQueueStats::current_shares(&self) -> usize
+pub fn glommio::TaskQueueStats::frame_overruns(&self) -> u64
 pub fn glommio::TaskQueueStats::index(&self) -> glommio::TaskQueueHandle
 pub fn glommio::TaskQueueStats::queue_selected(&self) -> u64
 pub fn glommio::TaskQueueStats::runtime(&self) -> core::time::Duration
@@ -4524,6 +4584,7 @@ pub fn glommio::ExecutorProxy::executor_stats(&self) -> glommio::ExecutorStats
 pub fn glommio::ExecutorProxy::id(&self) -> usize
 pub fn glommio::ExecutorProxy::io_stats(&self) -> glommio::IoStats
 pub fn glommio::ExecutorProxy::need_preempt(&self) -> bool
+pub fn glommio::ExecutorProxy::slot_wait_bound(&self, handle: glommio::TaskQueueHandle) -> core::option::Option<core::time::Duration>
 pub fn glommio::ExecutorProxy::spawn_blocking<F, R>(&self, func: F) -> impl core::future::future::Future<Output = R> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
 pub fn glommio::ExecutorProxy::spawn_local<T>(&self, future: impl core::future::future::Future<Output = T> + 'static) -> glommio::Task<T> where T: 'static
 pub fn glommio::ExecutorProxy::spawn_local_into<T>(&self, future: impl core::future::future::Future<Output = T> + 'static, handle: glommio::TaskQueueHandle) -> glommio::Result<glommio::Task<T>> where T: 'static
@@ -4684,6 +4745,7 @@ pub fn glommio::LocalExecutorBuilder::preempt_timer(self, dur: core::time::Durat
 pub fn glommio::LocalExecutorBuilder::record_io_latencies(self, enabled: bool) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::recv_buffers(self, buffers: impl core::convert::Into<glommio::RecvBuffers>) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::ring_depth(self, ring_depth: usize) -> glommio::LocalExecutorBuilder
+pub fn glommio::LocalExecutorBuilder::scheduling(self, scheduling: glommio::Scheduling) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::spawn<G, F, T>(self, fut_gen: G) -> glommio::Result<glommio::ExecutorJoinHandle<T>> where G: core::ops::function::FnOnce() -> F + core::marker::Send + 'static, F: core::future::future::Future<Output = T> + 'static, T: core::marker::Send + 'static
 pub fn glommio::LocalExecutorBuilder::spin_before_park(self, spin: core::time::Duration) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::unobserved_panic(self, policy: glommio::UnobservedPanic) -> Self
@@ -6150,6 +6212,63 @@ pub unsafe fn glommio::ResourceType<T>::init(init: <T as crossbeam_epoch::atomic
 impl<T> tracing::instrument::Instrument for glommio::ResourceType<T>
 impl<T> tracing::instrument::WithSubscriber for glommio::ResourceType<T>
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for glommio::ResourceType<T> where T: ?core::marker::Sized
+#[non_exhaustive] pub enum glommio::Scheduling
+pub glommio::Scheduling::Cyclic
+pub glommio::Scheduling::Cyclic::major: u32
+pub glommio::Scheduling::Cyclic::minor: core::time::Duration
+pub glommio::Scheduling::Vruntime
+impl core::clone::Clone for glommio::Scheduling
+pub fn glommio::Scheduling::clone(&self) -> glommio::Scheduling
+impl core::cmp::Eq for glommio::Scheduling
+impl core::cmp::PartialEq for glommio::Scheduling
+pub fn glommio::Scheduling::eq(&self, other: &glommio::Scheduling) -> bool
+impl core::default::Default for glommio::Scheduling
+pub fn glommio::Scheduling::default() -> glommio::Scheduling
+impl core::fmt::Debug for glommio::Scheduling
+pub fn glommio::Scheduling::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for glommio::Scheduling
+impl core::marker::StructuralPartialEq for glommio::Scheduling
+impl core::marker::Freeze for glommio::Scheduling
+impl core::marker::Send for glommio::Scheduling
+impl core::marker::Sync for glommio::Scheduling
+impl core::marker::Unpin for glommio::Scheduling
+impl core::marker::UnsafeUnpin for glommio::Scheduling
+impl core::panic::unwind_safe::RefUnwindSafe for glommio::Scheduling
+impl core::panic::unwind_safe::UnwindSafe for glommio::Scheduling
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for glommio::Scheduling where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for glommio::Scheduling where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for glommio::Scheduling where U: core::convert::From<T>
+pub fn glommio::Scheduling::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for glommio::Scheduling where U: core::convert::Into<T>
+pub type glommio::Scheduling::Error = core::convert::Infallible
+pub fn glommio::Scheduling::try_from(value: U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for glommio::Scheduling where U: core::convert::TryFrom<T>
+pub type glommio::Scheduling::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn glommio::Scheduling::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for glommio::Scheduling where T: core::clone::Clone
+pub type glommio::Scheduling::Owned = T
+pub fn glommio::Scheduling::clone_into(&self, target: &mut T)
+pub fn glommio::Scheduling::to_owned(&self) -> T
+impl<T> core::any::Any for glommio::Scheduling where T: 'static + ?core::marker::Sized
+pub fn glommio::Scheduling::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for glommio::Scheduling where T: ?core::marker::Sized
+pub fn glommio::Scheduling::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for glommio::Scheduling where T: ?core::marker::Sized
+pub fn glommio::Scheduling::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for glommio::Scheduling where T: core::clone::Clone
+pub unsafe fn glommio::Scheduling::clone_to_uninit(&self, dest: *mut u8)
+impl<T> core::convert::From<T> for glommio::Scheduling
+pub fn glommio::Scheduling::from(t: T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for glommio::Scheduling
+pub type glommio::Scheduling::Init = T
+pub const glommio::Scheduling::ALIGN: usize
+pub unsafe fn glommio::Scheduling::deref<'a>(ptr: usize) -> &'a T
+pub unsafe fn glommio::Scheduling::deref_mut<'a>(ptr: usize) -> &'a mut T
+pub unsafe fn glommio::Scheduling::drop(ptr: usize)
+pub unsafe fn glommio::Scheduling::init(init: <T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> tracing::instrument::Instrument for glommio::Scheduling
+impl<T> tracing::instrument::WithSubscriber for glommio::Scheduling
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for glommio::Scheduling where T: ?core::marker::Sized
 pub enum glommio::Shares
 pub glommio::Shares::Dynamic(alloc::rc::Rc<dyn glommio::SharesManager>)
 pub glommio::Shares::Static(usize)
@@ -6477,6 +6596,7 @@ pub fn glommio::ExecutorProxy::executor_stats(&self) -> glommio::ExecutorStats
 pub fn glommio::ExecutorProxy::id(&self) -> usize
 pub fn glommio::ExecutorProxy::io_stats(&self) -> glommio::IoStats
 pub fn glommio::ExecutorProxy::need_preempt(&self) -> bool
+pub fn glommio::ExecutorProxy::slot_wait_bound(&self, handle: glommio::TaskQueueHandle) -> core::option::Option<core::time::Duration>
 pub fn glommio::ExecutorProxy::spawn_blocking<F, R>(&self, func: F) -> impl core::future::future::Future<Output = R> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
 pub fn glommio::ExecutorProxy::spawn_local<T>(&self, future: impl core::future::future::Future<Output = T> + 'static) -> glommio::Task<T> where T: 'static
 pub fn glommio::ExecutorProxy::spawn_local_into<T>(&self, future: impl core::future::future::Future<Output = T> + 'static, handle: glommio::TaskQueueHandle) -> glommio::Result<glommio::Task<T>> where T: 'static
@@ -6691,6 +6811,7 @@ pub fn glommio::LocalExecutorBuilder::preempt_timer(self, dur: core::time::Durat
 pub fn glommio::LocalExecutorBuilder::record_io_latencies(self, enabled: bool) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::recv_buffers(self, buffers: impl core::convert::Into<glommio::RecvBuffers>) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::ring_depth(self, ring_depth: usize) -> glommio::LocalExecutorBuilder
+pub fn glommio::LocalExecutorBuilder::scheduling(self, scheduling: glommio::Scheduling) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::spawn<G, F, T>(self, fut_gen: G) -> glommio::Result<glommio::ExecutorJoinHandle<T>> where G: core::ops::function::FnOnce() -> F + core::marker::Send + 'static, F: core::future::future::Future<Output = T> + 'static, T: core::marker::Send + 'static
 pub fn glommio::LocalExecutorBuilder::spin_before_park(self, spin: core::time::Duration) -> glommio::LocalExecutorBuilder
 pub fn glommio::LocalExecutorBuilder::unobserved_panic(self, policy: glommio::UnobservedPanic) -> Self
@@ -7226,6 +7347,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 pub struct glommio::TaskQueueStats
 impl glommio::TaskQueueStats
 pub fn glommio::TaskQueueStats::current_shares(&self) -> usize
+pub fn glommio::TaskQueueStats::frame_overruns(&self) -> u64
 pub fn glommio::TaskQueueStats::index(&self) -> glommio::TaskQueueHandle
 pub fn glommio::TaskQueueStats::queue_selected(&self) -> u64
 pub fn glommio::TaskQueueStats::runtime(&self) -> core::time::Duration
