@@ -313,3 +313,61 @@ fn idle_owners_leave_their_frames_to_the_others() {
         busy.runtime()
     );
 }
+
+/// A latency queue that asks for a slot every frame and always has work does
+/// not take the whole CPU: the queues beside it still run.
+#[test]
+fn a_busy_latency_queue_tighter_than_a_frame_does_not_starve_the_others() {
+    let _timing = TIMING.lock().unwrap_or_else(|e| e.into_inner());
+    let (chunks, bound) = LocalExecutorBuilder::new(Placement::Unbound)
+        .scheduling(cyclic(10))
+        .spawn(|| async move {
+            let latency = executor().create_task_queue(
+                Shares::Static(1000),
+                Latency::Matters(MINOR),
+                "latency",
+            );
+            let cpu =
+                executor().create_task_queue(Shares::Static(1000), Latency::NotImportant, "cpu");
+            let chunks = Rc::new(Cell::new(0u64));
+            let stop = Rc::new(Cell::new(false));
+            let counted = chunks.clone();
+            let stopped = stop.clone();
+            let worker = spawn_local_into(
+                async move {
+                    while !stopped.get() {
+                        spin(CHUNK);
+                        counted.set(counted.get() + 1);
+                        yield_if_needed().await;
+                    }
+                },
+                cpu,
+            )
+            .unwrap();
+            let seen = chunks.clone();
+            let during = spawn_local_into(
+                async move {
+                    let start = Instant::now();
+                    while start.elapsed() < Duration::from_millis(200) {
+                        spin(CHUNK);
+                        yield_if_needed().await;
+                    }
+                    seen.get()
+                },
+                latency,
+            )
+            .unwrap()
+            .await;
+            stop.set(true);
+            worker.await;
+            (during, executor().slot_wait_bound(latency).unwrap())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    println!("tight latency: the CPU queue did {chunks} chunks meanwhile, bound {bound:?}");
+    assert!(
+        chunks >= 500,
+        "the CPU queue did {chunks} chunks in 200 ms beside the latency queue"
+    );
+}

@@ -112,11 +112,23 @@ impl NextFree {
     }
 }
 
+/// The most of a table latency queues may own together, as a divisor: half.
+///
+/// A latency queue's spacing is a reservation the queue claims whether or
+/// not it is busy, so one that asks for a slot every frame and always has
+/// work would own every frame and starve the rest, the executor's own main
+/// task included: measured, a CPU-heavy queue beside it did nothing at all.
+/// When the latency queues ask for more than this, every spacing is widened
+/// by the same factor until they fit, and the bound reported widens with
+/// it. `Latency::Matters` carries no budget, so the table has to impose one.
+const LATENCY_SHARE_DIVISOR: usize = 2;
+
 /// Builds the table for `members` over `major` frames.
 ///
 /// Latency queues are placed first, tightest first, each at its spacing from
 /// the first free frame, a slot that lands on a taken frame moving to the next
-/// free one. The frames left are divided among the other queues in proportion
+/// free one, their spacings widened alike if together they would own more
+/// than half the table. The frames left are divided among the other queues in proportion
 /// to their shares, by cumulative rounding so they add up exactly. Each
 /// queue's slots then go at evenly spaced ideal positions among those frames,
 /// the queues' phases staggered so that queues of one rate interleave, the
@@ -131,6 +143,12 @@ pub(super) fn build_table(members: &[Member], major: u32) -> Table {
     let mut frames = vec![NO_OWNER; len];
     let mut free = NextFree::new(len);
 
+    let demand: usize = members
+        .iter()
+        .filter_map(|m| m.spacing)
+        .map(|spacing| len.div_ceil((spacing as usize).clamp(1, len)))
+        .sum();
+    let widen = demand.div_ceil((len / LATENCY_SHARE_DIVISOR).max(1)).max(1);
     let mut by_spacing: Vec<Vec<usize>> = vec![Vec::new(); len + 1];
     for (at, member) in members.iter().enumerate() {
         if let Some(spacing) = member.spacing {
@@ -140,7 +158,7 @@ pub(super) fn build_table(members: &[Member], major: u32) -> Table {
     let mut placed = 0;
     for at in by_spacing.into_iter().flatten() {
         let member = &members[at];
-        let spacing = (member.spacing.unwrap() as usize).clamp(1, len);
+        let spacing = ((member.spacing.unwrap() as usize).clamp(1, len) * widen).min(len);
         let first = free.find(0);
         if first == len {
             break;
@@ -476,18 +494,23 @@ mod tests {
     }
 
     #[test]
-    fn a_latency_queue_tighter_than_a_frame_owns_every_frame() {
-        let members = [
-            member(0, 1000),
-            Member {
-                index: 1,
-                shares: 1,
-                spacing: Some(1),
-            },
-        ];
-        let table = build_table(&members, 10);
-        assert_eq!(slots(&table, 1).len(), 10);
-        assert!(!table.gaps.contains_key(&0));
+    fn latency_queues_own_at_most_half_the_table() {
+        let latency = |index, spacing| Member {
+            index,
+            shares: 1,
+            spacing: Some(spacing),
+        };
+        let table = build_table(&[member(0, 1000), latency(1, 1)], 10);
+        assert_eq!(slots(&table, 1).len(), 5);
+        assert_eq!(table.gaps[&1], 2, "every frame asked, every other given");
+        assert_eq!(slots(&table, 0).len(), 5);
+        let table = build_table(&[member(0, 1000), latency(1, 2), latency(2, 4)], 20);
+        assert_eq!(slots(&table, 1).len(), 5);
+        assert_eq!(slots(&table, 2).len(), 3);
+        assert_eq!(table.gaps[&1], 4);
+        assert_eq!(slots(&table, 0).len(), 12);
+        let table = build_table(&[member(0, 1000), latency(1, 4)], 20);
+        assert_eq!(table.gaps[&1], 4, "within half, as asked");
     }
 
     #[test]
