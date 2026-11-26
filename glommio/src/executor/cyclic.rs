@@ -281,8 +281,6 @@ pub(super) struct Cyclic {
     arms: u64,
     /// When the current frame began, so when its preempt timer fires.
     frame_start: Instant,
-    /// When the slice running now began.
-    slice_start: Instant,
 }
 
 /// How far past the end of its frame a slice may end and still count as
@@ -301,7 +299,6 @@ const OVERRUN_TOLERANCE_DIVISOR: u32 = 8;
 
 impl Cyclic {
     pub(super) fn new(minor: Duration, major: u32) -> Self {
-        let now = Instant::now();
         Self {
             minor,
             major: major.max(1),
@@ -309,8 +306,7 @@ impl Cyclic {
             stale: true,
             fires: u64::MAX,
             arms: u64::MAX,
-            frame_start: now,
-            slice_start: now,
+            frame_start: Instant::now(),
         }
     }
 
@@ -339,7 +335,7 @@ impl Cyclic {
     }
 
     /// Moves to the frame the preempt timer's counts name, and returns the
-    /// queue index that owns it. Starts the slice that is about to run.
+    /// queue index that owns it. Reads the time only when the frame changes.
     ///
     /// Each fire of the timer is a frame boundary and moves one place along
     /// the table. An arm without a fire, after a park or a cancelled timer,
@@ -350,13 +346,12 @@ impl Cyclic {
     /// and the timer wheel's next deadline between tasks, beside
     /// `need_preempt`. Not built: the latency ring's own events already end a
     /// slice early, and the owner then gets its claim back.
-    pub(super) fn enter(&mut self, fires: u64, arms: u64, now: Instant) -> usize {
+    pub(super) fn enter(&mut self, fires: u64, arms: u64) -> usize {
         if arms != self.arms || fires != self.fires {
             self.fires = fires;
             self.arms = arms;
-            self.frame_start = now;
+            self.frame_start = Instant::now();
         }
-        self.slice_start = now;
         let frames = &self.table.frames;
         if frames.is_empty() {
             return NO_OWNER;
@@ -383,17 +378,14 @@ impl Cyclic {
         false
     }
 
-    /// Charges the slice that ran for `runtime` from the last [`Self::enter`]
-    /// for what it ran past the end of its frame, adding it to `debt`, if
+    /// Charges a slice that ended at `end` for what it ran past the end of
+    /// its frame, adding it to `debt`, if
     /// that is more than an eighth of a frame: an overrun, which it returns
     /// whether it was. The debt is capped at one major frame, which the
     /// queue has also been charged in vruntime: one long stall does not lock
     /// a queue out of its slots for longer than a cycle.
-    pub(super) fn charge(&self, runtime: Duration, debt: &mut Duration) -> bool {
-        let deadline = self.frame_start + self.minor;
-        let start = self.slice_start.max(deadline);
-        let end = self.slice_start + runtime;
-        let late = end.saturating_duration_since(start);
+    pub(super) fn charge(&self, end: Instant, debt: &mut Duration) -> bool {
+        let late = end.saturating_duration_since(self.frame_start + self.minor);
         if late <= self.minor / OVERRUN_TOLERANCE_DIVISOR {
             return false;
         }
@@ -542,16 +534,16 @@ mod tests {
     fn an_overrun_is_charged_and_capped() {
         let minor = Duration::from_millis(1);
         let mut cyclic = Cyclic::new(minor, 4);
-        let now = Instant::now();
-        cyclic.enter(0, 0, now);
+        cyclic.enter(0, 0);
+        let start = cyclic.frame_start;
         let mut debt = Duration::ZERO;
-        assert!(!cyclic.charge(Duration::from_micros(900), &mut debt));
+        assert!(!cyclic.charge(start + Duration::from_micros(900), &mut debt));
         assert_eq!(debt, Duration::ZERO);
-        assert!(!cyclic.charge(Duration::from_micros(1050), &mut debt));
+        assert!(!cyclic.charge(start + Duration::from_micros(1050), &mut debt));
         assert_eq!(debt, Duration::ZERO, "yielded within an eighth of a frame");
-        assert!(cyclic.charge(Duration::from_millis(3), &mut debt));
+        assert!(cyclic.charge(start + Duration::from_millis(3), &mut debt));
         assert_eq!(debt, Duration::from_millis(2));
-        assert!(cyclic.charge(Duration::from_millis(100), &mut debt));
+        assert!(cyclic.charge(start + Duration::from_millis(100), &mut debt));
         assert_eq!(debt, Duration::from_millis(4));
     }
 
@@ -559,23 +551,22 @@ mod tests {
     fn a_queue_in_debt_gives_up_one_frame_per_frame() {
         let minor = Duration::from_millis(1);
         let mut cyclic = Cyclic::new(minor, 4);
-        let now = Instant::now();
         let mut debt = Duration::from_micros(2500);
         let mut paid = u64::MAX;
-        cyclic.enter(0, 0, now);
+        cyclic.enter(0, 0);
         assert!(cyclic.skips(&mut debt, &mut paid));
         assert!(cyclic.skips(&mut debt, &mut paid), "the rest of the frame");
         assert_eq!(debt, Duration::from_micros(1500), "paid once");
-        cyclic.enter(0, 1, now);
+        cyclic.enter(0, 1);
         assert!(
             cyclic.skips(&mut debt, &mut paid),
             "a re-arm is the same frame"
         );
         assert_eq!(debt, Duration::from_micros(1500));
-        cyclic.enter(1, 2, now);
+        cyclic.enter(1, 2);
         assert!(cyclic.skips(&mut debt, &mut paid));
         assert_eq!(debt, Duration::from_micros(500));
-        cyclic.enter(2, 3, now);
+        cyclic.enter(2, 3);
         assert!(
             !cyclic.skips(&mut debt, &mut paid),
             "less than a frame owed"

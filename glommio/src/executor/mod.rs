@@ -79,7 +79,7 @@ mod window_model;
 
 pub(crate) use context::{ExecutorContext, WeakExecutorContext};
 pub use cyclic::Scheduling;
-use queue_heap::QueueHeap;
+use queue_heap::{QueueHeap, RunHeap};
 
 pub(crate) const DEFAULT_EXECUTOR_NAME: &str = "unnamed";
 pub(crate) const DEFAULT_PREEMPT_TIMER: Duration = Duration::from_millis(100);
@@ -780,7 +780,7 @@ impl Preempted {
 
 #[derive(Debug)]
 struct ExecutorQueues {
-    active_executors: QueueHeap,
+    active_executors: RunHeap,
     available_executors: AHashMap<usize, Rc<RefCell<TaskQueue>>>,
     active_executing: Option<Rc<RefCell<TaskQueue>>>,
     executor_index: usize,
@@ -814,7 +814,7 @@ impl ExecutorQueues {
     /// from 1.
     fn new(preempt_timer_duration: Duration, spin_before_park: Option<Duration>) -> Self {
         ExecutorQueues {
-            active_executors: QueueHeap::new(),
+            active_executors: RunHeap::Plain(Default::default()),
             available_executors: AHashMap::new(),
             active_executing: None,
             executor_index: 1,
@@ -833,6 +833,8 @@ impl ExecutorQueues {
 
     /// Switches to the cyclic policy, ticking every `minor`.
     fn set_cyclic(&mut self, minor: Duration, major: u32) {
+        debug_assert!(self.active_executors.is_empty());
+        self.active_executors = RunHeap::Indexed(QueueHeap::new());
         self.cyclic = Some(Box::new(cyclic::Cyclic::new(minor, major)));
         self.preempt_timer_duration = minor;
         self.default_preempt_timer_duration = minor;
@@ -871,25 +873,28 @@ impl ExecutorQueues {
 
     fn pick_cyclic(&mut self, reactor: &reactor::Reactor) -> Option<Rc<RefCell<TaskQueue>>> {
         let cyclic = self.cyclic.as_deref_mut().unwrap();
+        let RunHeap::Indexed(heap) = &mut self.active_executors else {
+            unreachable!("the cyclic policy runs on the indexed heap");
+        };
         if cyclic.stale {
             cyclic.rebuild(self.available_executors.values());
         }
         let (fires, arms) = reactor.preempt_epoch();
-        let owner = cyclic.enter(fires, arms, Instant::now());
+        let owner = cyclic.enter(fires, arms);
         if let Some(queue) = self.available_executors.get(&owner) {
             let runnable = queue.borrow().heap_slot.get() != queue_heap::NOT_IN_HEAP;
             if runnable && !Self::skips(cyclic, queue) {
                 let queue = queue.clone();
-                self.active_executors.remove(&queue);
+                heap.remove(&queue);
                 return Some(queue);
             }
         }
-        let least = self.active_executors.pop()?;
-        if self.active_executors.is_empty() || !Self::skips(cyclic, &least) {
+        let least = heap.pop()?;
+        if heap.is_empty() || !Self::skips(cyclic, &least) {
             return Some(least);
         }
-        let next = self.active_executors.pop();
-        self.active_executors.push(least);
+        let next = heap.pop();
+        heap.push(least);
         next
     }
 
@@ -899,17 +904,21 @@ impl ExecutorQueues {
         cyclic.skips(&mut state.frame_debt, &mut state.paid_frame)
     }
 
-    /// Under the cyclic policy, charges `queue`'s slice of `runtime` for what
-    /// it ran past the end of its frame, counts an overrun, and marks the
-    /// table stale if the queue's dynamic shares changed.
+    /// Under the cyclic policy, charges `queue`'s slice for what it ran past
+    /// the end of its frame, counts an overrun, and marks the table stale if
+    /// the queue's dynamic shares changed.
+    ///
+    /// A slice can have run past its frame only if the frame's timer has
+    /// fired, and until the next reactor pass that shows in `need_preempt`,
+    /// a load from the ring: only then is the time read.
     #[inline]
-    fn account_frame(&mut self, queue: &Rc<RefCell<TaskQueue>>, runtime: Duration) {
+    fn account_frame(&mut self, queue: &Rc<RefCell<TaskQueue>>, reactor: &reactor::Reactor) {
         let Some(cyclic) = self.cyclic.as_deref_mut() else {
             return;
         };
         let mut state = queue.borrow_mut();
         let state = &mut *state;
-        if cyclic.charge(runtime, &mut state.frame_debt) {
+        if reactor.need_preempt() && cyclic.charge(Instant::now(), &mut state.frame_debt) {
             state.stats.frame_overruns += 1;
         }
         if state.cyclic_shares.get() != state.stats.reciprocal_shares {
@@ -2380,7 +2389,7 @@ impl LocalExecutor {
         let mut tq = self.context.queues.borrow_mut();
         tq.active_executing = None;
         tq.in_slice = false;
-        tq.account_frame(&queue, runtime);
+        tq.account_frame(&queue, &self.context.reactor);
         tq.stats.executor_runtime += runtime;
         tq.stats.tasks_executed += tasks_executed_this_loop;
         let vruntime = match vruntime {
